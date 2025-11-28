@@ -1,0 +1,13 @@
+[package]
+name = "syfala_net"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+rtrb = { version = "0.3", optional = true }
+arrayvec = "0.7"
+
+[features]
+
+default = ["rtrb"]

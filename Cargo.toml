@@ -1,0 +1,8 @@
+[workspace]
+
+members = [
+    "syfala_net",
+    "syfala_jack",
+]
+
+resolver = "2"

@@ -1,0 +1,9 @@
+[package]
+name = "syfala_jack"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+syfala_net = { path = "../syfala_net", features = ["rtrb"] }
+jack = "0.13"
