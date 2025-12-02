@@ -1,11 +1,18 @@
 use super::*;
-use core::{mem, ops};
+use core::ops;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Timer {
     zero: u64,
     current: u64,
     // invariant: current >= zero
+}
+
+impl Default for Timer {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Timer {
@@ -61,15 +68,8 @@ impl Timer {
     }
 
     #[inline(always)]
-    fn drift(&self, next_timestamp: u64) -> Option<Drift> {
+    fn drift(&self, next_timestamp: u64) -> Result<Option<Drift>, num::TryFromIntError> {
         Drift::new(self, next_timestamp)
-    }
-}
-
-impl Default for Timer {
-    #[inline(always)]
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -81,83 +81,42 @@ impl ops::AddAssign<usize> for Timer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Drift {
+pub(crate) struct Drift {
     negative: bool,
     abs: num::NonZeroUsize,
 }
 
 impl Drift {
     #[inline(always)]
-    fn new(timer: &Timer, next_timestamp: u64) -> Option<Self> {
+    fn new(timer: &Timer, next_timestamp: u64) -> Result<Option<Self>, num::TryFromIntError> {
         let c = timer.current();
-        num::NonZeroUsize::new(usize::try_from(next_timestamp.abs_diff(c)).unwrap()).map(|abs| {
-            Self {
+        usize::try_from(next_timestamp.abs_diff(c)).map(|abs| {
+            num::NonZeroUsize::new(abs).map(|abs| Self {
                 negative: next_timestamp < c,
                 abs,
-            }
+            })
         })
     }
 
     #[inline(always)]
     pub(crate) fn total_samples(self, nominal_n_samples: usize) -> usize {
-        let abs = num::NonZeroUsize::try_from(self.abs).unwrap();
+        let abs = self.abs.get();
 
         if self.negative {
-            nominal_n_samples.saturating_sub(abs.get())
+            nominal_n_samples.saturating_sub(abs)
         } else {
-            nominal_n_samples.strict_add(abs.get())
+            nominal_n_samples.strict_add(abs)
         }
     }
 
     #[inline(always)]
-    pub const fn is_negative(&self) -> bool {
+    pub(crate) const fn is_negative(&self) -> bool {
         self.negative
     }
 
     #[inline(always)]
-    pub const fn abs(&self) -> num::NonZeroUsize {
+    pub(crate) const fn abs(&self) -> num::NonZeroUsize {
         self.abs
-    }
-}
-
-#[derive(Clone)]
-pub struct Waker {
-    thread_handle: thread::Thread,
-    chunk_size_spls: num::NonZeroUsize,
-}
-
-impl Waker {
-    #[inline(always)]
-    pub fn useless() -> Self {
-        Self::new(thread::current(), num::NonZeroUsize::MAX)
-    }
-
-    #[inline(always)]
-    pub const fn new(thread_handle: thread::Thread, chunk_size_spls: num::NonZeroUsize) -> Self {
-        Self {
-            thread_handle,
-            chunk_size_spls,
-        }
-    }
-
-    #[inline(always)]
-    pub const fn chunk_size_samples(&self) -> num::NonZeroUsize {
-        self.chunk_size_spls
-    }
-
-    #[inline(always)]
-    pub const fn set_chunk_size_samples(&mut self, chunk_size_spls: num::NonZeroUsize) {
-        self.chunk_size_spls = chunk_size_spls;
-    }
-
-    #[inline(always)]
-    pub const fn set_thread_handle(&mut self, handle: thread::Thread) -> thread::Thread {
-        mem::replace(&mut self.thread_handle, handle)
-    }
-
-    #[inline(always)]
-    fn wake(&self) {
-        self.thread_handle.unpark();
     }
 }
 
@@ -169,16 +128,18 @@ pub(crate) struct WakingTimer {
 impl Default for WakingTimer {
     #[inline(always)]
     fn default() -> Self {
-        Self {
-            timer: timing::Timer::new(),
-            waker: Waker::useless(),
-        }
+        Self::new()
     }
 }
 
 impl WakingTimer {
     #[inline(always)]
-    pub(crate) const fn new(waker: Waker) -> Self {
+    pub(crate) fn new() -> Self {
+        Self::with_waker(Waker::useless())
+    }
+
+    #[inline(always)]
+    pub(crate) const fn with_waker(waker: Waker) -> Self {
         Self {
             timer: timing::Timer::new(),
             waker,
@@ -203,7 +164,7 @@ impl WakingTimer {
     }
 
     #[inline(always)]
-    pub(crate) fn drift(&self, next_timestamp: u64) -> Option<Drift> {
+    pub(crate) fn drift(&self, next_timestamp: u64) -> Result<Option<Drift>, num::TryFromIntError> {
         self.timer.drift(next_timestamp)
     }
 }
