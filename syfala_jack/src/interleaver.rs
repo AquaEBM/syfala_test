@@ -1,6 +1,6 @@
 use super::*;
 
-use core::{ptr, mem};
+use core::ptr;
 
 /// Allows interleaving samples, from a set of jack ports,
 /// but allocates space for the pointers only once
@@ -26,20 +26,6 @@ impl<Spec> Interleaver<Spec> {
 
         // SAFETY: We are a `#[repr(transparent)]` struct
         Some(unsafe { mem::transmute(boxed_slice) })
-    }
-
-    #[inline(always)]
-    pub fn n_channels(&self) -> num::NonZeroUsize {
-        num::NonZeroUsize::new(self.ptrs.len()).unwrap()
-    }
-
-    #[inline(always)]
-    pub fn from_mut(slice: &mut [(jack::Port<Spec>, ptr::NonNull<f32>)]) -> Option<&mut Self> {
-        if slice.len() == 0 {
-            return None;
-        }
-        // SAFETY: We are a `#[repr(transparent)]` struct, lifetimes are well-defined
-        Some(unsafe { mem::transmute(slice) })
     }
 }
 

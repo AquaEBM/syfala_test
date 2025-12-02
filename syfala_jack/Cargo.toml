@@ -7,3 +7,8 @@ edition = "2024"
 
 syfala_net = { path = "../syfala_net", features = ["rtrb"] }
 jack = "0.13"
+
+[[bin]]
+
+path = "src/main.rs"
+name = "test"
