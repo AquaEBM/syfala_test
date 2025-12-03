@@ -1,3 +1,5 @@
+//! Implementation of a simple protocol for real-time audio communication and discovery
+
 use core::{iter, num, ops};
 use std::{io, thread};
 
@@ -16,6 +18,7 @@ pub const SILENCE: Sample = 0.;
 
 pub const SAMPLE_SIZE: num::NonZeroUsize = nz(size_of::<Sample>());
 
+/// Represents a server's audio configuration. May have more fields in the future.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioConfig {
     n_channels: num::NonZeroU32,
@@ -50,6 +53,8 @@ impl AudioConfig {
     }
 }
 
+/// Enables waking a thread in a periodic manner, usually used in conjunction
+/// with the queues in [`queue`]. Use [`Waker::useless`] for a waker that does nothing.
 #[derive(Clone)]
 pub struct Waker {
     thread_handle: thread::Thread,

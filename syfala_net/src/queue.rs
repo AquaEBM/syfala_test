@@ -1,3 +1,8 @@
+//! Utilities for sending audio streams to other threads using real-time ring buffers.
+//! With periodic waking functionality,
+//! 
+//! Re-exports [`rtrb`] for convenience.
+
 use super::*;
 
 /// Convenience re-export of rtrb
@@ -138,8 +143,7 @@ impl Receiver {
     }
 
     /// Attempts to read `nominal_n_samples` samples from the ring buffer, `timestamp` is used to
-    /// pad with silence, or skip samples when necessary. Use `self.an_available_samples()` to
-    /// empty the ring buffer.
+    /// pad with silence, or skip samples when necessary.
     #[inline]
     pub fn recv<'a>(
         &'a mut self,

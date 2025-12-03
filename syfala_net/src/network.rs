@@ -1,3 +1,5 @@
+//! Network implementation: all packet parsing is done here.
+
 use super::*;
 
 // All packets not starting with either of these are not valid as per our protocol.
@@ -23,6 +25,8 @@ const MAX_DATAGRAM_SIZE: num::NonZeroUsize = nz(1452);
 pub mod client {
     use super::*;
 
+    /// Sends a discovery packet to `dest_addr` address using the given `socket`
+    /// Be sure to enable broadcast if `dest_addr` is a broadcast address
     #[inline]
     pub fn send_discovery(
         socket: &std::net::UdpSocket,
@@ -60,6 +64,8 @@ pub mod client {
         // buffer size in frames: 4 bytes (u32), non zero, little endian
         + size_of::<u32>();
 
+    /// Attempts to receive a server configuration from this socket. If `None` is returned,
+    /// then, a packet was received that wasn't a configuration packet 
     #[inline(always)]
     pub fn try_recv_config(
         socket: &std::net::UdpSocket,
@@ -145,6 +151,8 @@ pub mod client {
             max_samples_left.min(chunk_samples_left).try_into().unwrap()
         }
 
+        /// It is not recommended to call this function directly. using `send` provides
+        /// more consistent buffer. We still provide it however, if needed.
         #[inline]
         pub fn flush(
             &mut self,
@@ -164,6 +172,10 @@ pub mod client {
             Ok(())
         }
 
+        /// Trys Sends the provided iterator of samples using the given `socket`.
+        /// 
+        /// Returns `true` if data was flushed from the buffer. `false` means that not enough
+        /// data was given.
         #[inline]
         pub fn send(
             &mut self,
@@ -198,9 +210,6 @@ pub mod server {
         ClientDiscovery,
         ClientAudio { timestamp: u64, samples: T },
     }
-
-    // Essentially a copy-paste of the previous function, but the sample iterator
-    // borrows from buf
 
     #[inline]
     pub fn recv_message<'b>(
