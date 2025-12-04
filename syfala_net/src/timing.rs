@@ -3,7 +3,7 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Timer {
     zero: u64,
-    current: u64,
+    curr: u64,
     // invariant: current >= zero
 }
 
@@ -17,20 +17,17 @@ impl Default for Timer {
 impl Timer {
     #[inline(always)]
     const fn new() -> Self {
-        Self {
-            zero: 0,
-            current: 0,
-        }
+        Self { zero: 0, curr: 0 }
     }
 
     #[inline(always)]
     const fn elapsed(&self) -> u64 {
-        self.current.strict_sub(self.zero)
+        self.curr.strict_sub(self.zero)
     }
 
     #[inline(always)]
     const fn current(&self) -> u64 {
-        self.current
+        self.curr
     }
 
     #[inline(always)]
@@ -54,15 +51,15 @@ impl Timer {
 
     #[inline(always)]
     fn advance(&mut self, time: usize) {
-        self.current = self.current.strict_add(u64::try_from(time).unwrap());
+        self.curr = self.curr.strict_add(u64::try_from(time).unwrap());
     }
 
     #[inline(always)]
     const fn set_zero_timestamp(&mut self, timestamp: u64) {
-        self.current = if timestamp < self.zero() {
-            self.current.strict_sub(self.zero().strict_sub(timestamp))
+        self.curr = if timestamp < self.zero() {
+            self.curr.strict_sub(self.zero().strict_sub(timestamp))
         } else {
-            self.current.strict_add(timestamp.strict_sub(self.zero()))
+            self.curr.strict_add(timestamp.strict_sub(self.zero()))
         };
         self.zero = timestamp;
     }
@@ -70,13 +67,6 @@ impl Timer {
     #[inline(always)]
     fn drift(&self, next_timestamp: u64) -> Result<Option<Drift>, num::TryFromIntError> {
         Drift::new(self, next_timestamp)
-    }
-}
-
-impl ops::AddAssign<usize> for Timer {
-    #[inline(always)]
-    fn add_assign(&mut self, rhs: usize) {
-        self.advance(rhs)
     }
 }
 
@@ -109,20 +99,10 @@ impl Drift {
     }
 }
 
-impl ops::Neg for Drift {
-    type Output = Self;
-
-    fn neg(self) -> Self::Output {
-        Self {
-            negative: !self.negative,
-            abs: self.abs,
-        }
-    }
-}
-
+#[derive(Debug, Clone)]
 pub(crate) struct WakingTimer {
     timer: timing::Timer,
-    pub(crate) waker: Waker,
+    waker: Waker,
 }
 
 impl Default for WakingTimer {
@@ -156,6 +136,16 @@ impl WakingTimer {
         }
 
         self.timer.advance(delta);
+    }
+
+    #[inline(always)]
+    pub(crate) const fn waker(&self) -> &Waker {
+        &self.waker
+    }
+
+    #[inline(always)]
+    pub(crate) const fn waker_mut(&mut self) -> &mut Waker {
+        &mut self.waker
     }
 
     #[inline(always)]

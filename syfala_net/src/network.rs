@@ -2,6 +2,8 @@
 
 use super::*;
 
+use std::io;
+
 // All packets not starting with either of these are not valid as per our protocol.
 // This not only allows us to identify and distinguish packets that are part of it,
 // but also quickly eliminate any foreign traffic by only inspecting the first 4 bytes
@@ -65,7 +67,7 @@ pub mod client {
         + size_of::<u32>();
 
     /// Attempts to receive a server configuration from this socket. If `None` is returned,
-    /// then, a packet was received that wasn't a configuration packet 
+    /// then, a packet was received that wasn't a configuration packet
     #[inline(always)]
     pub fn try_recv_config(
         socket: &std::net::UdpSocket,
@@ -173,7 +175,7 @@ pub mod client {
         }
 
         /// Trys Sends the provided iterator of samples using the given `socket`.
-        /// 
+        ///
         /// Returns `true` if data was flushed from the buffer. `false` means that not enough
         /// data was given.
         #[inline]

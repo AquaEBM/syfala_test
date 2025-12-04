@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 
-rtrb = { version = "0.3", optional = true }
+rtrb = { version = "0.3", default-features = false, optional = true }
 arrayvec = "0.7"
 
 [features]

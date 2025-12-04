@@ -1,9 +1,9 @@
 //! Implementation of a simple protocol for real-time audio communication and discovery
 
-use core::{iter, num, ops};
-use std::{io, thread};
+use core::num;
 
 pub mod network;
+
 #[cfg(feature = "rtrb")]
 pub mod queue;
 mod timing;
@@ -55,9 +55,9 @@ impl AudioConfig {
 
 /// Enables waking a thread in a periodic manner, usually used in conjunction
 /// with the queues in [`queue`]. Use [`Waker::useless`] for a waker that does nothing.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Waker {
-    thread_handle: thread::Thread,
+    thread_handle: std::thread::Thread,
     chunk_size_spls: num::NonZeroUsize,
 }
 
@@ -70,11 +70,14 @@ impl Default for Waker {
 impl Waker {
     #[inline(always)]
     pub fn useless() -> Self {
-        Self::new(thread::current(), num::NonZeroUsize::MAX)
+        Self::new(std::thread::current(), num::NonZeroUsize::MAX)
     }
 
     #[inline(always)]
-    pub const fn new(thread_handle: thread::Thread, chunk_size_spls: num::NonZeroUsize) -> Self {
+    pub const fn new(
+        thread_handle: std::thread::Thread,
+        chunk_size_spls: num::NonZeroUsize,
+    ) -> Self {
         Self {
             thread_handle,
             chunk_size_spls,
@@ -95,22 +98,4 @@ impl Waker {
     fn wake(&self) {
         self.thread_handle.unpark();
     }
-}
-
-fn reshape_iter(
-    drift: Option<timing::Drift>,
-    iterator: impl IntoIterator<Item = Sample>,
-) -> impl Iterator<Item = Sample> {
-    // Notice how neither are positive at the same time
-    let (padding_spls, skipped_spls) = if let Some(drift) = drift {
-        if drift.is_negative() {
-            (0, drift.abs().get())
-        } else {
-            (drift.abs().get(), 0)
-        }
-    } else {
-        (0, 0)
-    };
-
-    return iter::repeat_n(SILENCE, padding_spls).chain(iterator.into_iter().skip(skipped_spls));
 }

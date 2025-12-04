@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 
-syfala_net = { path = "../syfala_net", features = ["rtrb"] }
+syfala_net = { path = "../syfala_net" }
 jack = "0.13"

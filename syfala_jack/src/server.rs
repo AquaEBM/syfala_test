@@ -35,10 +35,7 @@ impl jack::ProcessHandler for AudioReceiver {
 
         let _samples = self
             .rx
-            .recv(
-                timestamp,
-                interleaved,
-            )
+            .recv(timestamp, interleaved)
             .expect("ERROR: Huge drift");
         jack::Control::Continue
     }
@@ -65,7 +62,7 @@ fn start_jack_client(
 
     let (tx, rx) = queue::rtrb::RingBuffer::<f32>::new(rb_size_spls.get());
 
-    let sender = AudioReceiver::new(
+    let audio_rx = AudioReceiver::new(
         rx,
         syfala_net::Waker::useless(),
         (1..=n_ports.get()).map(|i| {
@@ -76,11 +73,11 @@ fn start_jack_client(
     )
     .unwrap();
 
-    let receiver = queue::Sender::new(tx);
+    let audio_tx = queue::Sender::new(tx);
 
-    let async_client = jack_client.activate_async((), sender)?;
+    let async_client = jack_client.activate_async((), audio_rx)?;
 
-    Ok((async_client, receiver))
+    Ok((async_client, audio_tx))
 }
 
 pub fn start(socket: &std::net::UdpSocket, config: AudioConfig) -> io::Result<Infallible> {
@@ -107,11 +104,8 @@ pub fn start(socket: &std::net::UdpSocket, config: AudioConfig) -> io::Result<In
                     }
                 }
                 server::ServerMessage::ClientAudio { timestamp, samples } => {
-
                     if let Some((sender, _)) = client_map.get_mut(&addr) {
-                        sender
-                            .send(timestamp, samples)
-                            .expect("ERROR: huge drift");
+                        sender.send(timestamp, samples).expect("ERROR: huge drift");
                     }
                 }
             }

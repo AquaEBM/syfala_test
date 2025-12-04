@@ -62,15 +62,10 @@ impl NetworkSender {
         socket: &std::net::UdpSocket,
         addr: &core::net::SocketAddr,
     ) -> io::Result<bool> {
-
         let slots = self.rx.slots();
         let chunk = self.rx.read_chunk(slots).unwrap();
 
-        self.sender.send(
-            socket,
-            addr,
-            chunk,
-        )
+        self.sender.send(socket, addr, chunk)
     }
 }
 
@@ -180,7 +175,7 @@ fn run_client(
                             let _ = mem::replace(old_config, config);
                         }
                     }
-                },
+                }
                 Entry::Vacant(e) => {
                     if let Ok((jack_client, sender)) = start_jack_client(
                         format!("Syfala\n{}\n{}", addr.ip(), addr.port()).as_str(),
