@@ -38,14 +38,15 @@ impl jack::ProcessHandler for AudioReceiver {
         let timer_timestamp = jack_timestamp
             .checked_sub(zero_timestamp)
             // At the time of writing, PipeWire's JACK shim is susceptible of triggering this
-            .expect("JACK ERROR: buggy frame clock");
+            .expect("JACK ERROR: buggy frame clock")
+            .strict_mul(self.interleaver.len().get().try_into().unwrap());
 
         let mut interleaved = self.interleaver.interleave(scope);
         let delay = self.delay_in_samples.min(interleaved.len());
 
         self.delay_in_samples = self.delay_in_samples.strict_sub(delay);
 
-        // skip the first delay samples (jack buffers are already zeroed)
+        // skip the first <delay> samples (jack buffers are already zeroed)
         if let Some(d) = num::NonZeroUsize::new(delay) {
             interleaved.nth(d.get().strict_sub(1));
         }
@@ -74,21 +75,26 @@ impl TimedSender for JackSender {
 
 pub fn start(
     socket: &std::net::UdpSocket,
-    config: AudioConfig,
-    rb_length: core::time::Duration,
-    delay: core::time::Duration,
+    n_channels: num::NonZeroU32,
+    mut rb_length: impl FnMut(core::net::SocketAddr, AudioConfig) -> core::time::Duration,
+    mut delay: impl FnMut(core::net::SocketAddr, AudioConfig) -> core::time::Duration,
 ) -> io::Result<Infallible> {
-    syfala_net::start_server(socket, config, |addr, config| {
-        let n_ports = num::NonZeroUsize::try_from(config.n_channels()).unwrap();
-
+    syfala_net::start_server(socket, |addr, req_config| {
         println!("Creating JACK client...");
+
         let name = format!("Client\n{}\n{}", addr.ip(), addr.port());
         let (jack_client, _status) =
             jack::Client::new(name.as_str(), jack::ClientOptions::NO_START_SERVER).ok()?;
 
+        let config = req_config.unwrap_or(AudioConfig::new(
+            n_channels,
+            jack_client.buffer_size().try_into().unwrap(),
+        ));
+        let n_ports = num::NonZeroUsize::try_from(config.n_channels()).unwrap();
+
         let sr = jack_client.sample_rate() as u128;
 
-        let rb_size_frames = (rb_length.as_nanos() * sr / 1_000_000_000) as usize;
+        let rb_size_frames = (rb_length(addr, config).as_nanos() * sr / 1_000_000_000) as usize;
 
         let rb_size_spls = rb_size_frames.checked_mul(n_ports.get()).unwrap();
 
@@ -99,7 +105,7 @@ pub fn start(
         let audio_rx = AudioReceiver::new(
             rx,
             syfala_net::Waker::useless(),
-            usize::try_from(delay.as_nanos() * sr / 1_000_000_000).unwrap(),
+            usize::try_from(delay(addr, config).as_nanos() * sr / 1_000_000_000).unwrap(),
             (1..=n_ports.get()).map(|i| {
                 jack_client
                     .register_port(&format!("output_{i}"), jack::AudioOut::default())
@@ -112,6 +118,12 @@ pub fn start(
 
         let async_client = jack_client.activate_async((), audio_rx).ok()?;
 
-        Some(JackSender { async_client, audio_tx })
+        Some((
+            JackSender {
+                async_client,
+                audio_tx,
+            },
+            config,
+        ))
     })
 }

@@ -6,25 +6,19 @@ use super::*;
 // This allows us to not only identify and distinguish packets that are part of it,
 // but also quickly eliminate any foreign traffic by only inspecting the first 4 bytes
 
-// Client -> Server
-
-// Payload: empty (for now)
-const PACKET_TYPE_ID_CLIENT_DISC: [u8; 4] = *b"SyFd";
 // Payload: 8 bytes (u64 timestamp) + samples (variable length (0..))
-const PACKET_TYPE_ID_CLIENT_AUDIO: [u8; 4] = *b"SyFa";
+const PACKET_TYPE_ID_AUDIO: [u8; 4] = *b"SyFa";
 
-// Server -> Client
-
-// Payload: 4 bytes (channel count: u32) + 4
-const PACKET_TYPE_ID_SERVER_CONFIG: [u8; 4] = *b"SyFc";
+// Payload: 0 or (4 bytes (channel count: u32) + 4 bytes (buffer size: u32))
+const PACKET_TYPE_ID_CONN: [u8; 4] = *b"SyFc";
 
 // limit packet sizes to this
-// Servers should, nonetheless, still accept larger packets
+// Servers can, nonetheless, still accept larger packets
 const MAX_DATAGRAM_SIZE: num::NonZeroUsize = nz(1452);
 
-const SERVER_CONFIG_PACKET_LEN: usize =
+pub(super) const CONN_PACKET_MAX_LEN: usize =
     // Packet id (4 bytes) (little endian)
-    PACKET_TYPE_ID_SERVER_CONFIG
+    PACKET_TYPE_ID_CONN
         .len()
         // channel count (4 bytes, non zero) (little endian)
         .strict_add(size_of::<u32>())
@@ -32,60 +26,36 @@ const SERVER_CONFIG_PACKET_LEN: usize =
         .strict_add(size_of::<u32>());
 
 #[inline]
-pub fn send_config(
+pub fn send_connection(
     socket: &std::net::UdpSocket,
     dest_addr: core::net::SocketAddr,
-    config: AudioConfig,
+    config: Option<AudioConfig>,
 ) -> io::Result<()> {
-    let mut packet_buf = [0u8; SERVER_CONFIG_PACKET_LEN];
+    let mut packet_buf = [0u8; CONN_PACKET_MAX_LEN];
+
+    let mut bytes_encoded = 0usize;
 
     let (packet_type, rem) = packet_buf.split_first_chunk_mut().unwrap();
-    *packet_type = PACKET_TYPE_ID_SERVER_CONFIG;
+    bytes_encoded = bytes_encoded.strict_add(packet_type.len());
+    *packet_type = PACKET_TYPE_ID_CONN;
 
-    let (channel_count, rem) = rem.split_first_chunk_mut().unwrap();
-    *channel_count = config.n_channels().get().to_le_bytes();
+    if let Some(config) = config {
+        let (channel_count, rem) = rem.split_first_chunk_mut().unwrap();
+        bytes_encoded = bytes_encoded.strict_add(channel_count.len());
+        *channel_count = config.n_channels().get().to_le_bytes();
 
-    let (buffer_size, rem) = rem.split_first_chunk_mut().unwrap();
-    *buffer_size = config.chunk_size_frames().get().to_le_bytes();
+        let (buffer_size, _rem) = rem.split_first_chunk_mut().unwrap();
+        bytes_encoded = bytes_encoded.strict_add(buffer_size.len());
+        *buffer_size = config.chunk_size_frames().get().to_le_bytes();
+    }
 
-    assert!(rem.is_empty(), "ERROR: missing fields");
+    let res = socket.send_to(&packet_buf[..bytes_encoded], dest_addr);
 
-    let res = socket.send_to(&packet_buf, dest_addr);
-
-    if res? != SERVER_CONFIG_PACKET_LEN {
+    if res? != bytes_encoded {
         Err(io::ErrorKind::Other.into())
     } else {
         Ok(())
     }
-}
-    
-#[inline(always)]
-fn parse_config(packet: &[u8]) -> Option<AudioConfig> {
-    let payload = packet
-        .split_first_chunk()
-        .filter(|&(&message, _)| message == PACKET_TYPE_ID_SERVER_CONFIG)?
-        .1;
-
-    let (&n_channels, rem) = payload.split_first_chunk()?;
-    let n_channels = u32::from_le_bytes(n_channels).try_into().unwrap();
-
-    let (&buffer_size_frames, _rem) = rem.split_first_chunk()?;
-    let buffer_size_frames = u32::from_le_bytes(buffer_size_frames).try_into().unwrap();
-
-    Some(AudioConfig::new(n_channels, buffer_size_frames))
-}
-
-/// Attempts to parse a server configuration from this socket. If `None` is returned,
-/// a packet has been received that wasn't a configuration packet
-#[inline(always)]
-pub fn try_recv_config(
-    socket: &std::net::UdpSocket,
-) -> io::Result<(core::net::SocketAddr, Option<AudioConfig>)> {
-    let mut packet_buf = [0u8; SERVER_CONFIG_PACKET_LEN];
-
-    let (bytes_read, peer_addr) = socket.recv_from(&mut packet_buf)?;
-
-    Ok((peer_addr, parse_config(&packet_buf[..bytes_read])))
 }
 
 /// Allows for writing iterators of samples over the network
@@ -98,12 +68,10 @@ impl<const N: usize> AudioSender<N> {
     #[inline(always)]
     pub fn new() -> Self {
         let mut scratch_buffer = arrayvec::ArrayVec::new_const();
-        scratch_buffer.extend(PACKET_TYPE_ID_CLIENT_AUDIO);
+        scratch_buffer.extend(PACKET_TYPE_ID_AUDIO);
         scratch_buffer.extend(0u64.to_le_bytes());
 
-        Self {
-            scratch_buffer,
-        }
+        Self { scratch_buffer }
     }
 
     #[inline(always)]
@@ -202,58 +170,54 @@ impl<const N: usize> AudioSender<N> {
     }
 }
 
-/// Sends a discovery packet to `dest_addr` address using the given `socket`
-/// Be sure to enable broadcasting if `dest_addr` is a broadcast address
-// Discovery packets are just constant (PACKET_TYPE_ID_CLIENT_DISC) for now
-#[inline]
-pub fn send_discovery(
-    socket: &std::net::UdpSocket,
-    dest_addr: core::net::SocketAddr,
-) -> io::Result<()> {
-    let err = socket.send_to(&PACKET_TYPE_ID_CLIENT_DISC, dest_addr);
+#[inline(always)]
+fn parse_config(payload: &[u8]) -> Option<AudioConfig> {
+    let (&n_channels, rem) = payload.split_first_chunk()?;
+    let n_channels = u32::from_le_bytes(n_channels).try_into().unwrap();
 
-    if err? != PACKET_TYPE_ID_CLIENT_DISC.len() {
-        Err(io::ErrorKind::Other.into())
-    } else {
-        Ok(())
-    }
+    let (&buffer_size_frames, _rem) = rem.split_first_chunk()?;
+    let buffer_size_frames = u32::from_le_bytes(buffer_size_frames).try_into().unwrap();
+
+    Some(AudioConfig::new(n_channels, buffer_size_frames))
 }
 
-pub enum ServerMessage<'a> {
-    ClientDiscovery,
-    ClientAudio {
+pub enum Message<'a> {
+    RequestConnection(Option<AudioConfig>),
+    Audio {
         timestamp: u64,
         sample_bytes: &'a [u8],
     },
 }
 
-#[inline]
-pub fn recv_message<'b>(
-    socket: &std::net::UdpSocket,
-    buf: &'b mut [u8],
-) -> io::Result<(core::net::SocketAddr, Option<ServerMessage<'b>>)> {
-    let (bytes_read, peer_addr) = socket.recv_from(buf)?;
+impl<'a> Message<'a> {
+    #[inline]
+    pub fn try_recv(
+        socket: &std::net::UdpSocket,
+        buf: &'a mut [u8],
+    ) -> io::Result<(core::net::SocketAddr, Option<Self>)> {
+        let (bytes_read, peer_addr) = socket.recv_from(buf)?;
 
-    let message = buf[..bytes_read]
-        .split_first_chunk()
-        .and_then(|(&id, payload)| {
-            if id == PACKET_TYPE_ID_CLIENT_AUDIO {
-                let Some((&timestamp, sample_bytes)) = payload.split_first_chunk() else {
-                    return None;
-                };
+        let message = buf[..bytes_read]
+            .split_first_chunk()
+            .and_then(|(&id, payload)| {
+                if id == PACKET_TYPE_ID_AUDIO {
+                    let Some((&timestamp, sample_bytes)) = payload.split_first_chunk() else {
+                        return None;
+                    };
 
-                let timestamp = u64::from_le_bytes(timestamp);
+                    let timestamp = u64::from_le_bytes(timestamp);
 
-                Some(ServerMessage::ClientAudio {
-                    timestamp,
-                    sample_bytes,
-                })
-            } else if id == PACKET_TYPE_ID_CLIENT_DISC {
-                Some(ServerMessage::ClientDiscovery)
-            } else {
-                None
-            }
-        });
+                    Some(Message::Audio {
+                        timestamp,
+                        sample_bytes,
+                    })
+                } else if id == PACKET_TYPE_ID_CONN {
+                    Some(Message::RequestConnection(parse_config(payload)))
+                } else {
+                    None
+                }
+            });
 
-    return Ok((peer_addr, message));
+        return Ok((peer_addr, message));
+    }
 }

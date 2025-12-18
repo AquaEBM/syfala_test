@@ -6,6 +6,8 @@ use std::{
     io, thread,
 };
 
+use crate::wire::CONN_PACKET_MAX_LEN;
+
 pub mod wire;
 
 pub mod queue;
@@ -127,22 +129,24 @@ const fn f32_from_bytes(&bytes: &[u8; 4]) -> f32 {
     f32::from_bits(u32::from_le_bytes(bytes))
 }
 
-const CLIENT_TIMEOUT: core::time::Duration = core::time::Duration::from_millis(500);
+const CLIENT_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(1);
 
 pub fn start_server<T: TimedSender>(
     socket: &std::net::UdpSocket,
-    config: AudioConfig,
-    mut on_connect: impl FnMut(core::net::SocketAddr, AudioConfig) -> Option<T>,
+    mut on_connect: impl FnMut(core::net::SocketAddr, Option<AudioConfig>) -> Option<(T, AudioConfig)>,
 ) -> io::Result<Infallible> {
     let mut buf = [0u8; 2000];
 
-    let mut client_map = HashMap::new();
+    let mut client_map = HashMap::<_, (std::time::Instant, _)>::new();
 
     loop {
-        let (addr, message) = match wire::recv_message(socket, &mut buf) {
+        
+        client_map.retain(|_, (last_seen, _)| last_seen.elapsed() < CLIENT_TIMEOUT);
+
+        let (addr, message) = match wire::Message::try_recv(socket, &mut buf) {
             Ok(ret) => ret,
             #[rustfmt::skip]
-            Err(e) => if ![
+            Err(e) => if [
                 io::ErrorKind::WouldBlock,
                 io::ErrorKind::TimedOut,
             ].contains(&e.kind()) {
@@ -154,37 +158,33 @@ pub fn start_server<T: TimedSender>(
 
         if let Some(message) = message {
             match message {
-                wire::ServerMessage::ClientDiscovery => {
-                    wire::send_config(socket, addr, config)?;
+                wire::Message::RequestConnection(maybe_config) => {
                     // NIGHTLY: #[feature(map_try_insert)] use try_insert instead
 
-                    if let Some((timestamp, _)) = client_map.get_mut(&addr) {
-                        *timestamp = std::time::Instant::now();
-                    } else {
-                        // TODO: we should probably offload this to another thread
-                        if let Some(tx) = on_connect(addr, config) {
-                            client_map.insert(addr, (std::time::Instant::now(), tx));
-                        }
+                    if let Some((last_seen, _)) = client_map.get_mut(&addr) {
+                        *last_seen = std::time::Instant::now();
+                        wire::send_connection(socket, addr, None)?;
+                    } else if let Some((tx, config)) = on_connect(addr, maybe_config) {
+                        // TODO: we should probably offload on_connect to another thread
+                        wire::send_connection(socket, addr, Some(config))?;
+                        client_map.insert(addr, (std::time::Instant::now(), tx));
                     }
                 }
-                wire::ServerMessage::ClientAudio {
+                wire::Message::Audio {
                     timestamp,
                     sample_bytes: samples,
                 } => {
-                    if let Some((instant, rx)) = client_map.get_mut(&addr) {
+                    if let Some((_, rx)) = client_map.get_mut(&addr) {
                         rx.send(timestamp, samples.as_chunks().0.iter().map(f32_from_bytes));
-                        *instant = std::time::Instant::now();
                     }
                 }
             }
         }
-
-        client_map.retain(|_, (instant, _)| instant.elapsed() < CLIENT_TIMEOUT);
     }
 }
 
 const EVENT_QUEUE_CAPACITY: usize = 1024;
-const SERVER_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(4);
+const SERVER_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(1);
 
 struct ServerEntry<T> {
     pub config: AudioConfig,
@@ -231,6 +231,7 @@ pub fn start_client<T: TimedReceiver>(
     socket: &std::net::UdpSocket,
     beacon_dest: core::net::SocketAddr,
     beacon_period: core::time::Duration,
+    suggest_config: Option<AudioConfig>,
     mut on_connect: impl FnMut(core::net::SocketAddr, AudioConfig, &thread::Thread) -> Option<T>,
 ) -> io::Result<Infallible> {
     let (mut config_tx, mut config_rx) = rtrb::RingBuffer::new(EVENT_QUEUE_CAPACITY);
@@ -239,17 +240,19 @@ pub fn start_client<T: TimedReceiver>(
         // Thread 1: beacon
         let beacon_thread = s.spawn(|| {
             loop {
-                wire::send_discovery(&socket, beacon_dest)?;
+                wire::send_connection(&socket, beacon_dest, suggest_config)?;
                 thread::sleep(beacon_period);
             }
         });
 
         // Thread 2: listen for and report responses
         let listener_thread = s.spawn(|| {
-            loop {
-                let (peer_addr, maybe_config) = wire::try_recv_config(socket)?;
+            let mut buf = [0u8 ; CONN_PACKET_MAX_LEN];
 
-                if let Some(config) = maybe_config {
+            loop {
+                let (peer_addr, maybe_config) = wire::Message::try_recv(socket, &mut buf).expect("no");
+
+                if let Some(wire::Message::RequestConnection(config)) = maybe_config {
                     
                     config_tx
                         .push((peer_addr, config))
@@ -266,18 +269,19 @@ pub fn start_client<T: TimedReceiver>(
             if beacon_thread.is_finished() {
                 return beacon_thread.join().unwrap();
             }
-
+            
             if listener_thread.is_finished() {
-                return listener_thread.join().unwrap();
+                return dbg!(listener_thread.join().unwrap());
             }
 
             // TODO? Ideally, this should be done on another thread. The current approach has the
             // advantage of requiring way less bookkeeping, but might stall audio sending a bit
+            // depending on how slow the on_connect function is
             while let Ok((addr, config)) = config_rx.pop() {
                 match server_map.entry(addr) {
                     Entry::Occupied(mut e) => {
-                        let old: &mut ServerEntry<T> = e.get_mut();
-                        if config != old.config {
+                        let old: &mut ServerEntry<_> = e.get_mut();
+                        if let Some(config) = config && config != old.config {
                             if let Some(recv) = on_connect(addr, config, &network_thread_handle) {
                                 *old = ServerEntry::new(recv, config);
                             } else {
@@ -288,8 +292,10 @@ pub fn start_client<T: TimedReceiver>(
                         }
                     }
                     Entry::Vacant(e) => {
-                        if let Some(recv) = on_connect(addr, config, &network_thread_handle) {
-                            e.insert(ServerEntry::new(recv, config));
+                        if let Some(config) = config {
+                            if let Some(recv) = on_connect(addr, config, &network_thread_handle) {
+                                e.insert(ServerEntry::new(recv, config));
+                            }
                         }
                     }
                 }
@@ -299,10 +305,10 @@ pub fn start_client<T: TimedReceiver>(
 
             let mut any_ready = false;
 
-            for (addr, sender) in server_map.iter_mut() {
-                any_ready |= match sender.carry_over(sender.sample_idx, socket, addr) {
+            for (addr, server) in server_map.iter_mut() {
+                any_ready |= match server.carry_over(server.sample_idx, socket, addr) {
                     Ok(b) => b,
-                    Err(e) => if ![
+                    Err(e) => if [
                         io::ErrorKind::WouldBlock,
                         io::ErrorKind::TimedOut,
                     ].contains(&e.kind()) {
