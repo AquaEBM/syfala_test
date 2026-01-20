@@ -1,14 +1,23 @@
-//! Client-side UDP network implementation
+//! Server-side UDP network implementation.
+//! 
+//! This module provides a thin UDP-based transport layer for servers implementing
+//! the `syfala_proto` message model. It handles serialization, deserialization, and
+//! basic receive loops, while delegating all protocol logic and state management to
+//! user-provided callbacks.
 
 use core::{convert::Infallible, net::SocketAddr};
 
-/// A server.
+/// A UDP server.
 /// 
-/// Encapsulates sending and receiving messages, as a server, over a UDP socket.
+/// This type encapsulates a UDP socket, used to communicate with one or more clients,
+/// and the stream formats advertised by the server. It provides facilities for sending
+/// messages to clients, but deliberately does **not** expose a public receive API.
 /// 
-/// It is intentional that there are no methods in this type's public interface for
-/// receiving messages. If you wish to do so. You must start a server using the
-/// [`ServerState`] trait.
+/// Message reception is driven through the [`ServerState`] trait, which defines
+/// the server’s receive loop and callback behavior.
+/// 
+/// The server itself is agnostic to whether messages are sent via unicast,
+/// multicast, or broadcast addresses.
 #[derive(Debug)]
 pub struct Server {
     sock: std::net::UdpSocket,
@@ -16,18 +25,28 @@ pub struct Server {
 }
 
 impl Server {
+    /// Creates a new server backed by the given UDP socket and stream formats.
+    /// 
+    /// # Note
+    /// 
+    /// The provided `formats` are advertised to clients during connection
+    /// establishment and remain fixed for the lifetime of the server.
     #[inline(always)]
     pub fn new(sock: std::net::UdpSocket, formats: syfala_proto::format::StreamFormats) -> Self {
         Self { sock, formats }
     }
 
+    /// Returns the stream formats advertised by this server.
     pub fn formats(&self) -> &syfala_proto::format::StreamFormats {
         &self.formats
     }
 
-    /// Serializes and sends the given `message` to the address provided by `dest_addr`
+    /// Serializes and sends a server message to the specified destination address.
     /// 
-    /// Note that `dest_addr` doesn't care if it's a multi, broad, or uni-cast address.
+    /// The message is encoded using [`postcard`] into the provided buffer and then
+    /// sent as a single UDP datagram.
+    /// 
+    /// The destination address may be unicast, multicast, or broadcast.
     #[inline(always)]
     pub fn send(
         &self,
@@ -35,7 +54,7 @@ impl Server {
         dest_addr: SocketAddr,
         buf: &mut [u8],
     ) -> std::io::Result<()> {
-        let left = syfala_proto::postcard::to_slice(&crate::ServerMessageFlat::from(message), buf)
+        let left = postcard::to_slice(&crate::ServerMessageFlat::from(message), buf)
             .map_err(crate::postcard_to_io_err)?
             .len();
 
@@ -50,10 +69,13 @@ impl Server {
         })
     }
 
-    /// Deserializes and receives a server message from the internal socket.
-    /// 
-    /// Note that if a datagram was found, but couldn't be parsed as one of our messages,
-    /// then the `Option` is `None`.
+    /// Receives and deserializes a client message from the underlying socket.
+    ///
+    /// On success, returns the sender’s socket address and an optional decoded
+    /// protocol message.
+    ///
+    /// If a datagram is received but cannot be parsed as a valid protocol message,
+    /// the returned `Option` will be `None`.
     #[inline(always)]
     fn recv<'a>(
         &self,
@@ -63,7 +85,7 @@ impl Server {
             let buf = &buf[..n];
             (
                 server,
-                syfala_proto::postcard::from_bytes::<'a, crate::ClientMessageFlat>(buf)
+                postcard::from_bytes::<'a, crate::ClientMessageFlat>(buf)
                     .ok()
                     .map(Into::into),
             )
@@ -71,9 +93,19 @@ impl Server {
     }
 }
 
-/// Encapsulates the state and callbacks a UDP server calls on reception of messages from clients
+/// Encapsulates server-side protocol state and message handling.
+/// 
+/// Implementors of this trait define how the server reacts to incoming client
+/// messages. The provided [`start`](ServerState::start) method runs a blocking receive
+/// loop and dispatches messages to [`on_message`](ServerState::on_message).
+/// 
+/// This design allows applications to cleanly separate networking concerns from
+/// higher-level protocol logic.
 pub trait ServerState {
-    /// The callback to be called on each message
+    /// Called on every received datagram.
+    ///
+    /// The `message` parameter is `None` if the datagram could not be decoded as a
+    /// valid protocol message.
     fn on_message(
         &mut self,
         server: &Server,
@@ -81,6 +113,12 @@ pub trait ServerState {
         message: Option<syfala_proto::message::Client<'_>>,
     ) -> std::io::Result<()>;
 
+    /// Starts the server receive loop.
+    ///
+    /// This function blocks indefinitely, receiving datagrams and invoking
+    /// [`on_message`](ServerState::on_message) for each one.
+    ///
+    /// The function only returns if a non-recoverable I/O error occurs.
     fn start(&mut self, server: &Server) -> std::io::Result<Infallible> {
         let mut buf = [0; 5000];
 

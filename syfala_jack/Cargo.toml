@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 
 syfala_utils = { path = "../syfala_utils" }
+syfala_network = { path = "../syfala_network" }
 jack = "0.13"
-syfala_proto = { path = "../syfala_proto" }
 
 [dev-dependencies]
 syfala_network = { path = "../syfala_network" }

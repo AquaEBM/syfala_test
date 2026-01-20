@@ -1,24 +1,48 @@
-//! Implementation of the message model, defined in the `syfala_proto` crate, that enables sending
-//! and receiving messages over UDP sockets, as well as simple traits encapsulating the states
-//! and callbacks for clients and servers.
+//! Implementation of the message model defined in the `syfala_proto` crate.
+//!
+//! This crate provides the runtime machinery needed to send and receive protocol
+//! messages over network sockets, along with lightweight abstractions for client and
+//! server state management.
+//!
+//! ## Scope
+//!
+//! - Encoding and decoding protocol messages using [`serde`] and [`postcard`].
+//! - Transport over network sockets (currently, UDP only)
+//! - Small helper traits for driving client and server states
+//!
+//! This crate is intentionally transport-focused: it does not redefine the
+//! protocol itself, but instead implements a concrete wire representation and
+//! communication layer for the message model described in `syfala_proto`.
 
 pub mod server;
 pub mod client;
-
 pub use syfala_proto;
+pub use postcard;
+pub use serde;
 
 use serde::{Deserialize, Serialize};
 
 // Internal types with flat enum representations so serde and postcard don't waste bandwidth
-// serializing/deserializing messages...
+// serializing/deserializing nested enums.
 // 
-// Callers of this library never see this type, as the conversions are used in
-// {Client/Server}::{send/recv}
-//
-// See relevant comment in syfala_proto::message
+// These enums remove structural nesting present in `syfala_proto::message` and instead
+// encode each meaningful message variant directly as a single discriminant. This mirrors
+// the kind of layout flattening performed by the Rust compiler for in-memory enums, but
+// applied explicitly at the wire level.
+// 
+// Callers of this library never see these types. They are used exclusively at the
+// serialization boundary in `{Client,Server}::{send,recv}`, and are converted to and from
+// the public protocol message types automatically.
+// 
+// See the relevant comment in `syfala_proto::message` for more.
 
 // ------
 
+/// Flattened wire representation of client-to-server messages.
+///
+/// This enum is a bandwidth-optimized counterpart to
+/// [`syfala_proto::message::Client`], with nested enums and empty payloads
+/// collapsed into distinct variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) enum ClientMessageFlat<'a> {
     Connect,
@@ -71,6 +95,10 @@ impl<'a> From<ClientMessageFlat<'a>> for syfala_proto::message::Client<'a> {
     }
 }
 
+/// Flattened wire representation of server-to-client messages.
+///
+/// This enum is a bandwidth-optimized counterpart to
+/// [`syfala_proto::message::Server`], with nested enums collapsed into distinct variants.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub(crate) enum ServerMessageFlat<'a> {
     Connect(syfala_proto::format::StreamFormats),
@@ -165,18 +193,24 @@ impl<'a> From<ServerMessageFlat<'a>> for syfala_proto::message::Server<'a> {
 
 // ----
 
-/// Utility for converting a postcard error into a [`std::io::Error`]
+/// Utility for converting a `postcard` error into a [`std::io::Error`].
+///
+/// This is primarily used at the UDP receive boundary, where deserialization
+/// failures must be reported using I/O–oriented error types.
 #[inline(always)]
-pub(crate) fn postcard_to_io_err(e: syfala_proto::postcard::Error) -> std::io::Error {
+pub(crate) fn postcard_to_io_err(e: postcard::Error) -> std::io::Error {
     match e {
-        syfala_proto::postcard::Error::DeserializeUnexpectedEnd => {
+        postcard::Error::DeserializeUnexpectedEnd => {
             std::io::ErrorKind::UnexpectedEof.into()
         }
         _ => std::io::ErrorKind::Other.into(),
     }
 }
 
-/// Checks if a [`std::io::Error`] represents a timeout.
+/// Returns `true` if the given I/O error kind represents a timeout condition.
+///
+/// This treats both `WouldBlock` and `TimedOut` as timeout-equivalent, which
+/// is useful when working with non-blocking or socket-based transports.
 #[inline(always)]
 pub(crate) fn io_err_is_timeout(e: std::io::ErrorKind) -> bool {
     use std::io::ErrorKind::*;

@@ -1,6 +1,6 @@
 # Syfala Protocol
 
-A simple network protocol for audio endpoint discovery, and communication of uncompressed, interleaved audio streams.
+A simple network protocol for audio endpoint discovery, and communication of packed, uncompressed, interleaved audio streams.
 
 Requires the latest stable version of the [Rust](https://rust-lang.org/tools/install/) compiler.
 
@@ -27,6 +27,6 @@ You can run:
 cargo doc --open -p <package_name>
 ```
 
-(replacing <package_name> with the one of the crates listed above)
+(replacing <package_name> with one of the crates listed above)
 
 To view the documentation for any of the crates above.

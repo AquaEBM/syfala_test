@@ -1,14 +1,34 @@
-//! Simple utilities used throughout implementations of our protocol
+//! Utilities for building predictable, low-latency, allocation-conscious data pipelines.
+//!
+//! This crate provides lightweight primitives for real-time data processing,
+//! particularly in networking and audio systems.
+//!
+//! Its components are designed to compose cleanly, enabling efficient handling
+//! of uninitialized buffers, periodic actions, and contiguous access to
+//! segmented queues while integrating with standard I/O abstractions.
 
 // TODO: create common adapters for [AudioData<'a> sequence] -> [padded samples]
 // for different sample types
-
-use core::{mem, num};
+use core::mem;
 pub mod queue;
 
-/// A small wrapper type used as a heartbeat (or any other message) timeout
+/// A lightweight wrapper around [`std::time::Instant`] used to track timeouts.
+/// Stores the instant at which the timer was last reset.
+///
+/// This type is primarily intended for implementing heartbeat or inactivity
+/// timeouts in connection-like protocols built on top of UDP or other
+/// connectionless transports.
+///
+/// ```ignore
+/// let mut timer = ConnectionTimer::new();
 /// 
-/// Intended to be used to maintain UDP "connections".
+/// // we have received a message from the peer.
+/// timer.reset();
+///
+/// if timer.elapsed() > TIMEOUT {
+///     // consider the peer disconnected
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct ConnectionTimer(std::time::Instant);
 
@@ -19,84 +39,41 @@ impl Default for ConnectionTimer {
 }
 
 impl ConnectionTimer {
-    /// Creates a new timer, measuring time from the moment it is created.
+    /// Creates a new timer starting at the current instant.
+    ///
+    /// Equivalent to calling [`Default::default`], but provided explicitly
+    /// for clarity at call sites.
     #[inline(always)]
     pub fn new() -> Self {
         Self(std::time::Instant::now())
     }
 
-    /// Resets the timer
+    /// Resets the timer to start measuring elapsed time from now.
+    ///
+    /// This discards any previously accumulated elapsed duration.
     #[inline(always)]
     pub fn reset(&mut self) {
         *self = Self::new()
     }
 
-    /// Measured elapsed time since the last time this timer was reset.
+    /// Returns the amount of time elapsed since the last reset.
     #[inline(always)]
     pub fn elapsed(&self) -> core::time::Duration {
         self.0.elapsed()
     }
 }
 
-#[derive(Debug)]
-pub struct MultichannelTx {
-    n_channels: num::NonZeroUsize,
-    // contains raw audio packets
-    tx: rtrb::Producer<u8>,
-}
-
-impl MultichannelTx {
-    #[inline(always)]
-    pub const fn new(tx: rtrb::Producer<u8>, n_channels: num::NonZeroUsize) -> Self {
-        Self { n_channels, tx }
-    }
-
-    #[inline(always)]
-    pub const fn n_channels(&self) -> num::NonZeroUsize {
-        self.n_channels
-    }
-
-    #[inline(always)]
-    pub const fn tx(&self) -> &rtrb::Producer<u8> {
-        &self.tx
-    }
-
-    #[inline(always)]
-    pub const fn tx_mut(&mut self) -> &mut rtrb::Producer<u8> {
-        &mut self.tx
-    }
-}
-
-#[derive(Debug)]
-pub struct MultichannelRx {
-    n_channels: num::NonZeroUsize,
-    // contains raw audio packets
-    rx: rtrb::Consumer<u8>,
-}
-
-impl MultichannelRx {
-    #[inline(always)]
-    pub const fn new(rx: rtrb::Consumer<u8>, n_channels: num::NonZeroUsize) -> Self {
-        Self { n_channels, rx }
-    }
-
-    #[inline(always)]
-    pub const fn n_channels(&self) -> num::NonZeroUsize {
-        self.n_channels
-    }
-
-    #[inline(always)]
-    pub const fn rx(&self) -> &rtrb::Consumer<u8> {
-        &self.rx
-    }
-
-    #[inline(always)]
-    pub const fn tx_mut(&mut self) -> &mut rtrb::Consumer<u8> {
-        &mut self.rx
-    }
-}
-
-/// An implementation of [`std::io::Cursor`] that uses uninit slices.
+/// A cursor-like writer over a buffer of uninitialized memory.
+///
+/// This type is conceptually similar to [`std::io::Cursor`], but operates over
+/// a slice of [`core::mem::MaybeUninit<u8>`] instead of a fully initialized
+/// byte slice.
+///
+/// # Purpose
+/// 
+/// This allows writing into preallocated but uninitialized memory without
+/// incurring the cost of initialization, useful for
+/// high-performance or low-level serialization code.
 pub struct UninitCursor<'a> {
     storage: &'a mut [core::mem::MaybeUninit<u8>],
     pos: usize,
@@ -105,13 +82,50 @@ pub struct UninitCursor<'a> {
 }
 
 impl<'a> UninitCursor<'a> {
-    /// Create a new cursor over the uninitialized buffer
-    pub fn new(storage: &'a mut [core::mem::MaybeUninit<u8>]) -> Self {
+
+    /// Returns the number of bytes, from the start of the buffer, have been initialized.
+    /// any bytes beyond that may be uninitialized.
+    /// 
+    /// This value never decreases.
+    pub const fn initialized(&self) -> usize {
+        self.pos
+    }
+
+    /// Returns the underlying full buffer backing this cursor.
+    ///
+    /// The returned slice includes **both initialized and uninitialized**
+    /// memory. It is undefined behavior to assume that any portion of the buffer
+    /// beyond the current cursor position is initialized.
+    /// 
+    /// Primarily intended for low-level inspection,
+    /// manual initialization, or usage with APIs that operate
+    /// directly on `MaybeUninit<u8>` buffers.
+    pub const fn inner(&self) -> &[core::mem::MaybeUninit<u8>] {
+        self.storage
+    }
+
+    /// Returns a mutable reference to the underlying buffer backing this cursor.
+    ///
+    /// The returned slice includes **both initialized and uninitialized** memory.
+    /// It is undefined behavior to assume that any portion of the buffer
+    /// beyond the current cursor position is initialized.
+    /// 
+    /// Primarily intended for low-level inspection,
+    /// manual initialization, or usage with APIs that operate
+    /// directly on `MaybeUninit<u8>` buffers.
+    pub const fn inner_mut(&mut self) -> &mut [core::mem::MaybeUninit<u8>] {
+        self.storage
+    }
+
+    /// Creates a new cursor over an uninitialized byte buffer.
+    ///
+    /// Initially, no bytes are considered initialized.
+    pub const fn new(storage: &'a mut [core::mem::MaybeUninit<u8>]) -> Self {
         Self { storage, pos: 0 }
     }
 
-    /// Return references to the initialized and uninitialized portions of our buffer
-    pub fn split(&self) -> (&[u8], &[core::mem::MaybeUninit<u8>]) {
+    /// Safely splits the buffer into initialized and uninitialized regions.
+    pub const fn split(&self) -> (&[u8], &[core::mem::MaybeUninit<u8>]) {
         // SAFETY: self.pos is always <= self.storage.len()
         let (init, uninit) = unsafe { self.storage.split_at_unchecked(self.pos) };
 
@@ -120,8 +134,10 @@ impl<'a> UninitCursor<'a> {
         (unsafe { mem::transmute(init) }, uninit)
     }
 
-    /// Return mutable references to the initialized and uninitialized portions of our buffer
-    pub fn split_mut(&mut self) -> (&mut [u8], &mut [core::mem::MaybeUninit<u8>]) {
+    /// Safely, and mutably, splits the buffer into initialized and uninitialized regions
+    /// 
+    /// the `u8` slice contains elements that are guaranteed to be initialized.
+    pub const fn split_mut(&mut self) -> (&mut [u8], &mut [core::mem::MaybeUninit<u8>]) {
         // Safety arguments are the same as above
 
         let (init, uninit) = unsafe { self.storage.split_at_mut_unchecked(self.pos) };
@@ -134,7 +150,7 @@ impl<'a> UninitCursor<'a> {
 impl<'a> std::io::Write for UninitCursor<'a> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
 
-        let remaining = self.storage.len().strict_sub(self.pos);
+        let remaining = self.inner().len().strict_sub(self.pos);
         let to_write = remaining.min(buf.len());
 
         let (_init, uninit) = self.split_mut();
@@ -146,8 +162,9 @@ impl<'a> std::io::Write for UninitCursor<'a> {
 
         self.pos = self.pos.strict_add(to_write);
 
-        // Note that this does the intended behavior of returning Ok(0)
-        // when buf is empty OR when we are full
+        // Returns Ok(0) when:
+        // - `buf` is empty
+        // - the cursor has no remaining capacity
         Ok(to_write)
     }
 
@@ -156,15 +173,43 @@ impl<'a> std::io::Write for UninitCursor<'a> {
     }
 }
 
-/// An implementation of [`std::io::Write`] that allows chaining two writers
-/// (in our case, in-memory slice cursors) as if they were contiguous
+/// A [`std::io::Write`] adapter that chains two writers together.
+///
+/// Writes are first attempted on the first writer until it can no longer
+/// accept data, after which all remaining writes are forwarded to the
+/// second writer.
+///
+/// # Intended use
+/// This is primarily useful for treating two fixed-size in-memory buffers
+/// as a single contiguous output destination without copying.
 pub struct ChainedWriter<W1, W2> {
     first: W1,
     second: W2,
     using_first: bool,
 }
 
+impl<W1, W2> ChainedWriter<W1, W2> {
+    /// Creates a new chained writer from two underlying writers.
+    ///
+    /// The first writer will be used until it is exhausted, after which
+    /// writes are forwarded to the second writer.
+    #[inline(always)]
+    pub const fn new(first: W1, second: W2) -> Self {
+        Self {
+            first,
+            second,
+            using_first: true,
+        }
+    }
+}
+
 impl<W1: std::io::Write, W2: std::io::Write> std::io::Write for ChainedWriter<W1, W2> {
+    /// Attempts to write into this chained writer.
+    ///
+    /// - The first writer is used until it returns `Err(WriteZero)` or accepts fewer
+    ///   bytes than requested.
+    /// 
+    /// - All subsequent writes go directly to the second writer
     fn write(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
 
         let mut total = 0;
@@ -182,7 +227,7 @@ impl<W1: std::io::Write, W2: std::io::Write> std::io::Write for ChainedWriter<W1
                         return Ok(total);
                     }
                 },
-                // this error is non-fatal, and means that this one's done
+                // A WriteZero error indicates the first writer is exhausted
                 Err(e) if e.kind() == std::io::ErrorKind::WriteZero => {
                     self.using_first = false;
                 }
@@ -195,11 +240,13 @@ impl<W1: std::io::Write, W2: std::io::Write> std::io::Write for ChainedWriter<W1
             total = n.strict_add(total);
         }
 
-        // Note that this does the intended behavior of returning Ok(0)
-        // when buf is empty OR when we are full (i.e. both writers are full)
+        // Returns Ok(0) when:
+        // - `buf` is empty
+        // - both writers are unable to accept additional data
         Ok(total)
     }
 
+    /// - `flush()` flushes both writers (if applicable)
     fn flush(&mut self) -> std::io::Result<()> {
         if self.using_first {
             self.first.flush()?;

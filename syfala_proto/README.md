@@ -1,44 +1,74 @@
 # `syfala_proto`
 
-Implementation of a simple protocol for real-time audio communication and discovery.
+A simple, low-latency protocol for real-time audio communication and discovery.
 
-The main idea is the following: A node in the network is a client, or a server.
-Typically, a server is the firmware on external hardware devices, and a client is the
-driver on consumer devices.
+This crate defines a message-based protocol intended for real-time audio
+streaming.
 
-The entire protocol is modelled by a set of messages, sent between endpoints.
+### Roles
 
-More details can be found in the rustdoc-generated docs.
+Each endpoint acts as either a **client** or a **server**:
 
-## Connection/Discovery Messages
+- **Servers** are typically firmware running on external or embedded devices.
+- **Clients** are typically drivers or applications running on consumer hardware.
 
-Connection messages are used to by endpoints to establish connections between other endpoints.
-e.g. When a server receives a `Client::Connect` message from an
-unknown client, if it accepts, it may send back to the client a
-`Server::Connect` message. A "connection" is then established.
+## Model
 
-Servers indicate their stream formats in their connection messages. Those _do not_ change for
-the lifetime of a connection. And are the formats of audio streams expected when IO is running.
-If, for some reason, a client is incompatible with any of the stream formats, it must refuse to
-connect.
+The protocol is defined entirely in terms of typed messages exchanged between
+endpoints. These messages fall into three broad categories:
 
-Clients or servers may send said conection messages over broadcast addresses if they wish to
-be discovered by other endpoints in a network.
+- **Connection / discovery messages**
+- **Control messages**
+- **Audio messages**
+
+See the rustdoc-generated docs for complete message definitions.
+
+## Connection and discovery
+
+Connection messages are used to establish communication between endpoints.
+For example, when a server receives a `Client::Connect`
+message from an unknown client, it may respond with a
+`Server::Connect` message to accept the connection.
+
+Once this exchange succeeds, a logical "connection" is established.
+
+Servers advertise their supported stream formats as part of the connection
+process. These formats are **fixed for the lifetime of the connection** and
+define the audio formats used during active I/O.
+
+If a client is incompatible with any advertised stream format, it must refuse
+the connection.
+
+Connection messages may be sent to broadcast addresses to support service
+discovery on a local network.
 
 ## Control messages
 
-Control messages, are infrequent, miscellaneous messages endpoints send to perform various
-actions. In our case, the only kind of control message implemented are those used to request to
-start and stop IO.
+Control messages are infrequent messages used to coordinate behavior between
+connected endpoints. Currently, they are limited to requests to start or stop
+audio I/O.
+
+Clients may request that audio I/O be started. Upon receiving such a request, servers
+must perform any required initialization, allocation, and clock anchoring **before**
+replying with a success response.
+
+A successful response indicates that the server is _immediately_ ready to send and
+receive audio data.
+
+If the server fails to start I/O, or explicitly refuses the request, it must report
+the failure back to the client.
+
+The same thing happens with Stopping IO, servers free the corresponding resources,
+then report back.
 
 ## Audio messages
 
-When a connection is active, and IO is active, endpoints must send and expect to receive
-audio messages.
+When a connection is established and I/O is active, endpoints exchange audio
+messages.
 
-Audio messages contain raw audio byte data, as well as indices to handle packet
-loss/reordering. The index of the stream the packet belongs to is also provided for receiving
-endpoints to know how to dispatch and encode that message.
+Audio messages carry raw audio bytes along with stream indices and byte offsets
+to allow receivers to interpet how to decode the data and handle packet loss and
+reordering.
 
-
-The types in this crate already implement `serde`'s `Serialize` and `Deserialize` traits, for the user to conveniently plug into other `serde` backends.
+The types in this crate already implement `serde`'s `Serialize` and `Deserialize`
+traits, for the user to conveniently plug into other `serde` backends.

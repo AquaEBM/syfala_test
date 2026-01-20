@@ -11,7 +11,7 @@ const SAMPLE_SIZE: num::NonZeroUsize = num::NonZeroUsize::new(size_of::<f32>()).
 /// 
 /// Used in [`DuplexProcessHandler`]
 pub struct JackMultichannelTx {
-    tx: syfala_utils::MultichannelTx,
+    tx: syfala_utils::queue::rtrb::Producer<u8>,
     interleaver: Box<interleaver::Interleaver<jack::AudioIn>>,
 }
 
@@ -22,18 +22,15 @@ impl JackMultichannelTx {
     ) -> Option<Self> {
         let interleaver = interleaver::Interleaver::new(ports)?;
 
-        Some(Self {
-            tx: syfala_utils::MultichannelTx::new(tx, interleaver.len()),
-            interleaver,
-        })
+        Some(Self { tx, interleaver })
     }
 }
 
 /// Wraps a [`syfala_utils::MultichannelRx`] alongside an [`interleaver::Interleaver<AudioOut>`]
-/// 
+///
 /// Used in [`DuplexProcessHandler`].
 pub struct JackMultichannelRx {
-    rx: syfala_utils::MultichannelRx,
+    rx: syfala_utils::queue::rtrb::Consumer<u8>,
     interleaver: Box<interleaver::Interleaver<jack::AudioOut>>,
 }
 
@@ -44,10 +41,7 @@ impl JackMultichannelRx {
     ) -> Option<Self> {
         let interleaver = interleaver::Interleaver::new(ports)?;
 
-        Some(Self {
-            rx: syfala_utils::MultichannelRx::new(rx, interleaver.len()),
-            interleaver,
-        })
+        Some(Self { rx, interleaver })
     }
 }
 
@@ -61,13 +55,20 @@ pub struct DuplexProcessHandler {
 
 impl jack::ProcessHandler for DuplexProcessHandler {
     fn process(&mut self, _client: &jack::Client, scope: &jack::ProcessScope) -> jack::Control {
-        let idx = u64::from(scope.last_frame_time());
-        let &prev_frame_idx = self.current_frame_idx.get_or_init(|| idx);
-        let n_frames_skipped = idx
-            .checked_sub(prev_frame_idx)
-            // At the time of writing, PipeWire's JACK shim is susceptible of triggering this
-            // :(
-            .expect("JACK ERROR: buggy frame counter");
+        let frame_idx = u64::from(scope.last_frame_time());
+        let n_frames = scope.n_frames();
+
+        for JackMultichannelTx { tx, interleaver } in &mut self.txs {
+            let n_channels = interleaver.len();
+            let frame_size_bytes = SAMPLE_SIZE.checked_mul(n_channels).unwrap();
+            let n_bytes_total = frame_size_bytes.get().checked_mul(n_frames.try_into().unwrap());
+
+            let mut chunk = syfala_utils::queue::producer_get_all(tx);
+
+            let writer = syfala_utils::queue::chunk_get_writer(&mut chunk);
+
+            
+        }
 
         // TODO...
 

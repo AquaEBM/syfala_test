@@ -1,67 +1,104 @@
 #![no_std]
-//! Implementation of a simple protocol for real-time audio communication and discovery.
-//! 
-//! The main idea is the following: A node in the network is a client, or a server.
+//! A simple, low-latency protocol for real-time audio communication and discovery.
 //!
-//! Typically, a server is the firmware on external hardware devices, and a client is the
-//! driver on consumer devices.
+//! This crate defines a message-based protocol intended for real-time audio
+//! streaming between networked endpoints.
+//!
+//! ## Roles
+//!
+//! Each endpoint acts as either a **client** or a **server**:
+//!
+//! - **Servers** are typically firmware running on external or embedded devices.
+//! - **Clients** are typically drivers or applications running on consumer hardware.
+//!
+//! ## Protocol model
+//!
+//! The protocol is defined entirely in terms of typed messages exchanged between
+//! endpoints. These messages fall into three broad categories:
+//!
+//! - **Connection / discovery messages**
+//! - **Control messages**
+//! - **Audio messages**
+//!
+//! See the [`message`] module for the complete message definitions.
+//!
+//! ## Connection and discovery
+//!
+//! Connection messages are used to establish communication between endpoints.
+//! For example, when a server receives a [`Client::Connect`](message::Client::Connect)
+//! message from an unknown client, it may respond with a
+//! [`Server::Connect`](message::Server::Connect) message to accept the connection.
+//!
+//! Once this exchange succeeds, a logical "connection" is established.
+//!
+//! Servers advertise their supported stream formats as part of the connection
+//! process. These formats are **fixed for the lifetime of the connection** and
+//! define the audio formats used during active I/O.
+//!
+//! If a client is incompatible with any advertised stream format, it must refuse
+//! the connection.
+//!
+//! Connection messages may be sent to broadcast addresses to support service
+//! discovery on a local network.
+//!
+//! ## Control messages
+//!
+//! Control messages are infrequent messages used to coordinate behavior between
+//! connected endpoints. Currently, they are limited to requests to start or stop
+//! audio I/O.
 //! 
-//! The entire protocol is modelled by a set of messages, sent between endpoints.
+//! Clients may request that audio I/O be started. Upon receiving such a request, servers
+//! must perform any required initialization, allocation, and clock anchoring **before**
+//! replying with a success response.
+//!
+//! A successful response indicates that the server is _immediately_ ready to send and
+//! receive audio data.
+//!
+//! If the server fails to start I/O, or explicitly refuses the request, it must report
+//! the failure back to the client.
 //! 
-//! See [`message`] for more.
+//! The same thing happens with Stopping IO, servers free the corresponding resources,
+//! then report back.
+//!
+//! ## Audio messages
+//!
+//! When a connection is established and I/O is active, endpoints exchange audio
+//! messages.
+//!
+//! Audio messages carry raw audio bytes along with stream indices and byte offsets
+//! to allow receivers to interpet how to decode the data and handle packet loss and
+//! reordering.
 //! 
-//! # Connection/Discovery Messages
-//! 
-//! Connection messages are used to by endpoints to establish connections between other endpoints.
-//! e.g. When a server receives a [`Client::Connect`](message::Client::Connect) message from an
-//! unknown client, if it accepts, it may send back to the client a
-//! [`Server::Connect`](message::Server::Connect) message. A "connection" is then established.
-//! 
-//! Servers indicate their stream formats in their connection messages. Those _do not_ change for
-//! the lifetime of a connection. And are the formats of audio streams expected when IO is running.
-//! If, for some reason, a client is incompatible with any of the stream formats, it must refuse to
-//! connect.
-//! 
-//! Clients or servers may send said conection messages over broadcast addresses if they wish to
-//! be discovered by other endpoints in a network.
-//! 
-//! # Control messages
-//! 
-//! Control messages are infrequent, miscellaneous messages endpoints send to perform various
-//! actions. In our case, the only kind of control message implemented are those to request to
-//! start and stop IO.
-//! 
-//! # Audio messages
-//! 
-//! When a connection is active, and IO is active, endpoints must send and expect to receive
-//! audio messages.
-//! 
-//! Audio messages contain raw audio byte data, as well as indices to handle packet
-//! loss/reordering. The index of the stream the packet belongs to is also provided for receiving
-//! endpoints to know how to dispatch and encode that message.
+//! The types in this crate already implement `serde`'s `Serialize` and `Deserialize`
+//! traits, for the user to conveniently plug into other `serde` backends.
+
 extern crate alloc;
 
 pub mod format;
 pub mod message;
-pub use postcard;
 
 use serde::{Serialize, Deserialize};
 
-/// Represents a chunk of raw audio data.
+/// A contiguous chunk of raw audio data belonging to a single stream.
 ///
-/// Note that [`byte_index`](Self::byte_index) is in _bytes_. It is up to you
-/// to decode it properly according to the format agreed upon with the peer.
+/// The [`byte_index`](Self::byte_index) is expressed in **bytes**, not frames
+/// or samples. It is the receiver’s responsibility to interpret this offset
+/// according to the negotiated stream format.
 ///
-/// By extension, [`bytes`](Self::bytes) might have any length, including zero.
-/// This means that it might contain incomplete frames or samples, or might not contain, __even
-/// a frame or sample boundary at all__.
+/// The [`bytes`](Self::bytes) slice may have **any length**, including zero.
+/// It may contain partial frames, partial samples, ___or data that does not contain
+/// any frame or sample boundary at all___
 ///
-/// If [`byte_index`](Self::byte_index) is greater than the `index + bytes.len()` of the
-/// previous message (i.e. a packet was lost), then _all bytes from the last frame boundary to
-/// the next frame boundary are considered lost_. Typically you would want to replace them with
-/// silence, or use a more elaborate scheme to reduce artifacts.
+/// ## Packet loss and reordering
 ///
-/// if it is less (packet reordering), _the entire packet is considered void_.
+/// - If `byte_index` is greater than the previous packet’s
+///   `byte_index + bytes.len()`, then data between the last complete frame and
+///   the next complete frame is considered lost.
+/// - If `byte_index` is less than expected (packet reordering), the entire
+///   packet should be discarded.
+///
+/// Typical strategies for packet loss recovery include silence insertion or more
+/// advanced concealment techniques.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AudioStreamData<'a> {
     pub byte_index: u64,
@@ -69,10 +106,12 @@ pub struct AudioStreamData<'a> {
     pub bytes: &'a [u8],
 }
 
-/// Like [`AudioData`], but includes the index of the stream to use:
-/// 
-/// - Sending clients indicate the index of the server's __output__ stream.
-/// - Sending servers indicate the index of their corresponding __input__ stream.
+/// Audio data tagged with the index of the stream it belongs to.
+///
+/// Stream indices are interpreted differently depending on the sender:
+///
+/// - **Clients** specify the index of the server’s **output** stream.
+/// - **Servers** specify the index of their corresponding **input** stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AudioData<'a> {
     pub stream_idx: usize,

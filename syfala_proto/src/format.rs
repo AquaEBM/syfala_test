@@ -1,12 +1,16 @@
-//! All types related to audio stream formats.
+//! Audio stream format definitions.
 
 use alloc::boxed::Box;
 use core::{fmt, num};
 use serde::{Deserialize, Serialize};
 
-/// All possible sample format types supported by our protocol.
-/// 
-/// Note that litte-endian, interleaved, uncompressed, is assumed.
+/// Supported sample formats.
+///
+/// All samples are assumed to be:
+/// - Packed (no unused bytes)
+/// - Little-endian
+/// - Interleaved
+/// - Uncompressed
 #[derive(Clone, Copy, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
 pub enum SampleType {
     U8,
@@ -24,22 +28,21 @@ pub enum SampleType {
 }
 
 impl SampleType {
-
-    /// Returns whether this is a signed format (includes floats).
+    /// Returns whether the format is signed (including floating-point types).
     #[inline(always)]
     pub const fn is_signed(self) -> bool {
         use SampleType::*;
         matches!(self, I8 | I16 | I24 | I32 | IEEF32 | IEEF64)
     }
 
-    /// Returns whether this is a floating point format.
+    /// Returns whether the format is floating-point.
     #[inline(always)]
     pub fn is_float(self) -> bool {
         use SampleType::*;
         matches!(self, IEEF32 | IEEF64)
     }
 
-    /// Returns the number of bytes occupied by a sample in this format.
+    /// Returns the size of a single sample in bytes.
     #[inline(always)]
     pub const fn sample_size(self) -> num::NonZeroU8 {
         use SampleType::*;
@@ -55,9 +58,9 @@ impl SampleType {
     }
 }
 
-/// A newtype wrapper around a sample rate, as a `f64`.
+/// A validated audio sample rate.
 ///
-/// The inner value is always positive and normal.
+/// The inner value is guaranteed to be positive and normal.
 #[derive(Clone, Copy, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
 #[serde(try_from = "f64")]
 pub struct SampleRate(f64);
@@ -68,19 +71,19 @@ impl SampleRate {
         &self.0
     }
 
-    /// Returns `Some(val)` if `val.is_normal() && val.is_sign_positive()`
-    /// 
-    /// Returns `None` otherwise.
+    /// Creates a new sample rate if the value is positive and
+    /// [normal](https://en.wikipedia.org/wiki/Normal_number_(computing)).
     #[inline(always)]
     pub const fn new(val: f64) -> Option<Self> {
         if val.is_normal() && val.is_sign_positive() {
-            return Some(Self(val));
+            Some(Self(val))
+        } else {
+            None
         }
-        None
     }
 }
 
-/// The error type, when creating an invalid sample rate.
+/// Error returned when creating an invalid [`SampleRate`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct SampleRateError;
 
@@ -100,24 +103,25 @@ impl TryFrom<f64> for SampleRate {
     }
 }
 
-/// A newtype wapper around an integer representing a channel count.
+/// Number of audio channels.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct ChannelCount(pub num::NonZeroU32);
 
-/// A newtype wapper around an integer representing a buffer size.
+/// Buffer size expressed in frames.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
-pub struct BufferSize(pub num::NonZeroU32);
+pub struct BufferSize(pub u32);
 
-/// Represents an audio stream configuration.
+/// A complete audio stream format description.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Format {
     pub sample_rate: SampleRate,
     pub channel_count: ChannelCount,
-    /// Important: This value is in ___frames___
+    /// Buffer size hint, expressed in frames.
     ///
-    /// Note that this field typically serves as a hint to help clients decide how
-    /// fast to send/play data and is in no way a constraint on packet contents/sizes.
-    pub buffer_size: Option<BufferSize>,
+    /// This value is advisory and does not constrain packet sizes.
+    /// 
+    /// If it is zero, then it must be considered as not provided.
+    pub buffer_size: BufferSize,
     pub sample_type: SampleType,
 }
 
@@ -129,54 +133,43 @@ impl Default for Format {
 }
 
 impl Format {
+    /// Returns the default format:
+    /// 
+    /// IEEF32, 48 kHz, stereo, 32-frame buffering.
     #[inline(always)]
-    /// The default format, IEEF32, 48kHz, 1 ch, 32-frame buffering
     pub const fn standard() -> Format {
         Format {
             sample_rate: SampleRate::new(48e3).unwrap(),
-            channel_count: ChannelCount(num::NonZeroU32::new(1).unwrap()),
-            buffer_size: Some(BufferSize(num::NonZeroU32::new(32).unwrap())),
+            channel_count: ChannelCount(num::NonZeroU32::new(2).unwrap()),
+            buffer_size: BufferSize(32),
             sample_type: SampleType::IEEF32,
         }
     }
 
-    /// This is the same as [`self.channel_count`](Self::channel_count)` *
-    /// `[`self.buffer_size`](Self::buffer_size)
+    /// Returns the number of samples per buffer, if a buffer size is specified.
     #[inline(always)]
     pub fn chunk_size_samples(&self) -> Option<num::NonZeroU32> {
-        self.buffer_size
-            .and_then(|n| n.0.checked_mul(self.channel_count.0))
+        num::NonZeroU32::new(self.buffer_size.0)
+            .map(|n| n.checked_mul(self.channel_count.0).unwrap())
     }
 
-    /// This is the same as [`self.chunk_size_samples`](Self::chunk_size_samples)` * `[`self.sample_type.sample_size()`](SampleType::sample_size)
+    /// Returns the number of bytes per buffer, if a buffer size is specified.
     #[inline(always)]
     pub fn chunk_size_bytes(&self) -> Option<num::NonZeroU32> {
-        self.chunk_size_samples()
-            .and_then(|n| n.checked_mul(self.sample_type.sample_size().into()))
+        self.chunk_size_samples().map(|n| {
+            n.checked_mul(self.sample_type.sample_size().into())
+                .unwrap()
+        })
     }
 }
 
-/// Represents _all_ the stream formats of a server. When IO starts, clients must expect
-/// audio data from _all_ input streams, and servers must expect data from _all_ output streams.
-/// 
-/// __Important:__
-/// 
-///  - Servers should _send_ audio data to clients in the formats specified by their
-/// __[`inputs`](Self::inputs)__.
-/// 
-///  - Clients should interpret _incoming_ audio data in the formats
-/// specified by the server's advertised __[`inputs`](Self::inputs)__.
-/// 
-///  - Servers should interpret _incoming_ audio data in the formats specified by their
-/// __[`outputs`](Self::outputs)__.
-/// 
-///  - Clients should _send_ audio data to clients in the format's specified by the server's
-/// advertised __[`outputs`](Self::outputs)__.
-/// 
-/// 
-/// For example, a server advertising 2 48khz input streams and 3 96khz output streams expects to
-/// __receive__ __exactly__ 3 96khz audio streams from each client, __and__ should __send__
-/// __exactly__ 2 48khz audio streams to each client.
+/// Describes all input and output stream formats of a server.
+///
+/// When I/O starts:
+/// - Clients must send audio for **all output streams**
+/// - Servers must send audio for **all input streams**
+///
+/// Stream counts and formats are fixed for the lifetime of the connection.
 #[derive(Debug, Default, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct StreamFormats {
     pub inputs: Box<[Format]>,

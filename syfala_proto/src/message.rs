@@ -1,75 +1,72 @@
-//! All message types sent by endpoints
+//! All protocol message types exchanged between endpoints.
 
 use serde::{Deserialize, Serialize};
-
-/// Represents the state of audio between a client and a server.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum IOState<T = (), U = ()> {
-    Start(T),
-    Stop(U),
-}
-
-/// A generic error message
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum Error {
-    Failure,
-    /// The difference between this variant and failure is the implied meaning that the operation
-    /// will never succeed and the requester shouldn't bother retrying.
-    Refusal,
-}
 
 // Similarly to what the rust compiler does when optimizing data type layouts. you'd probably want
 // to create new, flat enums (and deriving serde for them) that will be what gets (en/de)coded over
 // the wire. This is because "sub-enum" discriminants are encoded individually, making the
-// final, effective, serialized size a bit larger, meaning that your throughput takes a hit
-// esp. for audio messages
+// final, effective, serialized size a bit larger, meaning that your throughput gets imapcted
+// esp. for audio messages.
 
-/// Messages sent by clients to connected servers
+/// Represents a requested or resulting audio I/O state transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum IOState<T = (), U = ()> {
+    /// Request or indicate that audio I/O should start.
+    Start(T),
+    /// Request or indicate that audio I/O should stop.
+    Stop(U),
+}
+
+/// A generic error message used during connection or control handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Error {
+    /// The operation failed, but may succeed if retried.
+    Failure,
+    /// The operation is permanently unsupported or refused and should not be retried.
+    Refusal,
+}
+
+/// Messages sent by clients to connected servers.
 pub mod client {
     use super::*;
 
-    /// Control Messages sent from a client to a connected server
+    /// Control messages sent from a client to a connected server.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     pub enum Control {
-        /// Sent when requesting to change the state of the IO between us and a server
+        /// Requests a change in the audio I/O state.
+        ///
+        /// # Note
         /// 
-        /// It is important to know that when starting IO, the client must expect audio data
-        /// with all _all_ the server's input stream formats, and the server must expect audio
-        /// data from with all of it's input stream formats.
-        /// 
-        /// In short, starting IO (and succeedig) -> starting _all_ __input and output__ streams.
+        /// When starting I/O, both sides must expect **all** advertised input
+        /// and output streams to become active _simultaneously_, and for as long as IO is active.
         RequestIOStateChange(IOState),
     }
 
-    /// All messages sent from a client to a connected server.
+    /// Messages sent by a client after a connection is established.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     pub enum Connected<'a> {
-        /// Control messages
+        /// Control-related messages.
         Control(Control),
-        /// Audio data
-        /// 
-        /// See [`StreamFormats`](crate::format::StreamFormats) for more.
+        /// Audio data.
+        ///
+        /// See [`StreamFormats`](crate::format::StreamFormats) for more on stream layout.
         Audio(#[serde(borrow)] crate::AudioData<'a>),
     }
 }
 
-/// All message types that can be sent by clients, and received by servers.
+/// Messages that can be sent by clients and received by servers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Client<'a> {
-    /// Send this message to connect to a new server.
-    /// 
-    /// Must be sent as a response to a [`Server::Connect`] message,
-    /// if the request has been accepted.
-    /// 
-    /// This mesesage can be used as a discovery beacon.
-    /// 
-    /// It is not necessary to use it if using, e.g. TCP.
+    /// Requests a new connection.
+    ///
+    /// May also be used as a discovery beacon.
     Connect,
-    /// Sent in response to a [`Server::Connect`] message, if the request fails or is refused.
+    /// Sent if a connection attempt fails or is refused.
     /// 
-    /// It is not necessary to use it if using, e.g. TCP.
+    /// Typically, a client should send this if it doesn't support any of a server's
+    /// advertised stream formats.
     ConnectionError(Error),
-    /// All messages sent from a client to an already connected server
+    /// Messages sent after a connection is established.
     Connected(#[serde(borrow)] client::Connected<'a>),
 }
 
@@ -77,41 +74,34 @@ pub enum Client<'a> {
 pub mod server {
     use super::*;
 
-    /// Control Messages sent from a client to a connected server
+    /// Control messages sent from a server to a connected client.
     #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
     pub enum Control {
-        /// Sent in response to a [`client::Control::RequestIOStateChange`] message
+        /// Response to a client I/O state change request.
         IOStateChangeResult(IOState<Result<(), Error>, Result<(), Error>>),
     }
 
-    /// All messages sent from a server to a connected client.
+    /// Messages sent by a server after a connection is established.
     #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
     pub enum Connected<'a> {
-        /// Control Messages
+        /// Control-related messages.
         Control(Control),
         /// Audio data.
-        /// 
-        /// See [`StreamFormats`](crate::format::StreamFormats) for more.
+        ///
+        /// See [`StreamFormats`](crate::format::StreamFormats) for stream layout.
         Audio(#[serde(borrow)] crate::AudioData<'a>),
     }
 }
 
-/// All message types that can be sent by servers, and received by clients.
+/// Messages that can be sent by servers and received by clients.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum Server<'a> {
-    /// Send this message to connect to a new client.
-    /// 
-    /// Must be sent as a response to a [`Client::Connect`] message,
-    /// if the request has been accepted.
-    /// 
-    /// This mesesage can be used as a discovery beacon.
-    /// 
-    /// It is not necessary to use it if using, e.g. TCP.
+    /// Accepts a connection and advertises supported stream formats.
+    ///
+    /// May also be used as a discovery beacon.
     Connect(crate::format::StreamFormats),
-    /// Sent in response to a [`Client::Connect`] message, if the request fails or is refused.
-    /// 
-    /// It is not necessary to use it if using, e.g. TCP.
+    /// Sent if a connection attempt fails or is refused.
     ConnectionError(Error),
-    /// All messages sent from a server to an already connected client
+    /// Messages sent after a connection is established.
     Connected(#[serde(borrow)] server::Connected<'a>),
 }
