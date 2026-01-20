@@ -12,7 +12,7 @@ use std::{
     sync::{LazyLock, Mutex, OnceLock},
 };
 
-// This directive allows passing -lframework CoreFoundation to the system linker
+// This directive allows passing `-lframework CoreFoundation` to the system linker
 // We need this because some symbols generated in coreaudio_sys, aren't linked correctly
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {}
@@ -370,8 +370,7 @@ pub unsafe extern "C" fn create(
     // the IUnknown methods that are used to discover that actual interface to talk to the dr`iver.
     // The majority of the driver's initilization should be handled in the Initialize() method of
     // the driver's AudioServerPlugInDriverInterface.
-
-    // TODO: move this to a static or similar
+    
     // Well... there's really nothing we can do if we fail to set up logging
     let _ = OsLogger::new(PLUGIN_BUNDLE_ID)
         .level_filter(log::LevelFilter::Trace)

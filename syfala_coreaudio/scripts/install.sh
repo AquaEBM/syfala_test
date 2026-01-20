@@ -1,7 +1,7 @@
 NAME="syfala_coreaudio"
 LIBRARY_PATH=$1
 # replace with your own signature
-TEAM_ID="8SHPR83B3J"
+TEAM_ID=""
 
 # the UUID of our plugin factory
 # you can also use uuidgen

@@ -1,7 +1,8 @@
 use core::{iter, mem, num, ptr};
 
 /// Allows interleaving samples, from a set of jack ports,
-/// but allocates space for the pointers only once
+/// but allocates space for the pointers only once.
+/// (To avoid allocating in RT threads)
 #[repr(transparent)]
 pub struct Interleaver<Spec> {
     ptrs: [(jack::Port<Spec>, ptr::NonNull<f32>)],
@@ -32,6 +33,8 @@ impl<Spec> Interleaver<Spec> {
         num::NonZeroUsize::new(self.ptrs.len()).unwrap()
     }
 }
+
+// See this: (https://predr.ag/blog/definitive-guide-to-sealed-traits-in-rust/)
 
 mod private {
     pub trait Sealed {}

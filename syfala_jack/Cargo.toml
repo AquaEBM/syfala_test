@@ -5,8 +5,10 @@ edition = "2024"
 
 [dependencies]
 
-syfala_network = { path = "../syfala_network" }
+syfala_utils = { path = "../syfala_utils" }
 jack = "0.13"
+syfala_proto = { path = "../syfala_proto" }
 
 [dev-dependencies]
-nohash = { version = "0.2" }
+syfala_network = { path = "../syfala_network" }
+rustc-hash = { version = "2" }

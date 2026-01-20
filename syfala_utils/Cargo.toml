@@ -6,4 +6,3 @@ edition = "2024"
 [dependencies]
 
 rtrb = "0"
-syfala_proto = { path = "../syfala_proto" }

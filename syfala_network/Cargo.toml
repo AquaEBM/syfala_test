@@ -5,7 +5,8 @@ edition = "2024"
 
 [dependencies]
 
-postcard = { version = "1", default-features = false }
 syfala_proto = { path = "../syfala_proto" }
-oneshot = { version = "0" }
-syfala_utils = { path = "../syfala_utils" }
+serde = { version = "1", default-features = false, features = [
+    "derive",
+    "alloc",
+] }
