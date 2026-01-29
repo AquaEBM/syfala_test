@@ -1,12 +1,12 @@
 //! UDP client state machine for managing multiple servers.
-//! 
+//!
 //! This module provides a synchronous (blocking), client that tracks server connections,
 //! handles IO state (start/stop requests active audio), and manages per-server deadlines
 //! for timeout detection
-//! 
+//!
 //! The implementation relies on typestate-based transitions and explicit
 //! state machines to model the server IO lifecycle.
-//! 
+//!
 //! Socket timeouts are used to periodically poll server deadlines and
 //! disconnect inactive servers.
 
@@ -38,8 +38,8 @@ const ENCODE_BUF_LEN: usize = 2000;
 impl<Cx: ClientContext + ?Sized> ServerIOState<Cx> {
     /// Handles an incoming `Server::Connected` message.
     ///
-    /// Dispatches control-plane and audio messages to the current state object,
-    /// performs state transitions and callbacks where needed.
+    /// Dispatches control and audio messages to the current state object,
+    /// adn performs state transitions and callbacks where needed.
     ///
     /// Invalid messages for the current state are ignored, but may be logged.
     fn on_msg(
@@ -135,6 +135,9 @@ impl<Cx: ClientContext + ?Sized> ServerIOState<Cx> {
                 },
             },
 
+            // timeout updating is done outside of this function
+            Connected::Control(server::Control::Heartbeat) => (),
+
             Connected::Audio(header) => match self {
                 ServerIOState::Active(s) => s.on_audio(cx, timestamp, header, rem_buf),
                 _ => {
@@ -155,8 +158,6 @@ impl<Cx: ClientContext + ?Sized> ServerIOState<Cx> {
 ///
 /// It implements the [`Client`] so that it can be driven by a blocking UDP receive loop.
 pub struct GenericClient<C: ClientContext> {
-    /// User-provided callbacks defining connection, IO, and audio behavior.
-    callbacks: C,
     /// Priority queue tracking next timeout per server.
     ///
     /// We use [`core::cmp::Reverse`] here to ensure the _earliest_ instant
@@ -164,6 +165,8 @@ pub struct GenericClient<C: ClientContext> {
     deadlines: ServerPQ<cmp::Reverse<std::time::Instant>>,
     /// Per-server state machine storage.
     servers: ServerMap<ServerIOState<C>>,
+    /// User-provided callbacks defining connection, IO, and audio behavior.
+    callbacks: C,
 }
 
 impl<C: ClientContext> GenericClient<C> {
@@ -245,6 +248,8 @@ impl<C: ClientContext> GenericClient<C> {
         }
 
         if self.servers.contains_key(&addr) {
+            // not that push _replaces_ the corresponding entry if it already exists, so the
+            // number of elements in deadlines is always exactly the number of connected servers
             self.deadlines.push(
                 addr,
                 cmp::Reverse(timestamp.checked_add(CONN_TIMEOUT).unwrap()),
@@ -259,9 +264,6 @@ impl<C: ClientContext> GenericClient<C> {
 
 impl<C: ClientContext> super::Client for GenericClient<C> {
     /// Handles an incoming UDP message (or lack thereof).
-    ///
-    /// If `maybe_msg` is `Some`, it is dispatched to protocol handlers.
-    /// If `None`, a missing packet may be used later for logging or diagnostics.
     fn on_message(
         &mut self,
         sock: &super::ClientSocket<impl crate::SyncUdpSock>,
@@ -279,11 +281,11 @@ impl<C: ClientContext> super::Client for GenericClient<C> {
                 ServerIOState::Inactive(s) => match s.poll_start_io(&mut self.callbacks) {
                     Ok(s) => ServerIOState::PendingStart(s),
                     Err(s) => ServerIOState::Inactive(s),
-                }
+                },
                 ServerIOState::Active(s) => match s.poll_stop_io(&mut self.callbacks) {
                     Ok(s) => ServerIOState::PendingStop(s),
                     Err(s) => ServerIOState::Active(s),
-                }
+                },
                 state => state,
             });
         }
@@ -292,7 +294,7 @@ impl<C: ClientContext> super::Client for GenericClient<C> {
     }
 
     /// Handles a socket receive timeout.
-    /// 
+    ///
     /// Expires all servers whose deadlines have elapsed, removes them
     /// from the map, and resets the socket receive timeout to the next
     /// earliest deadline if any.

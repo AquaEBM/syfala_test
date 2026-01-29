@@ -63,6 +63,7 @@ pub(crate) enum ClientMessageFlat {
         n_bytes: u32,
     } = u32::from_le_bytes(*b"caud"),
     Disconnect = u32::from_le_bytes(*b"cded"),
+    Heartbeat = u32::from_le_bytes(*b"cliv"),
 }
 
 impl From<ClientMessageFlat> for proto::message::Client {
@@ -88,6 +89,9 @@ impl From<ClientMessageFlat> for proto::message::Client {
             ClientMessageFlat::ConnectionFailed => Self::ConnectionResult(Err(Error::Failure(()))),
             ClientMessageFlat::ConnectionRefused => Self::ConnectionResult(Err(Error::Refusal(()))),
             ClientMessageFlat::Disconnect => Self::Disconnect,
+            ClientMessageFlat::Heartbeat => {
+                Self::Connected(client::Connected::Control(client::Control::Heartbeat))
+            }
         }
     }
 }
@@ -105,6 +109,7 @@ impl From<proto::message::Client> for ClientMessageFlat {
                         IOState::Start(()) => Self::StartIO,
                         IOState::Stop(()) => Self::StopIO,
                     },
+                    client::Control::Heartbeat => Self::Heartbeat,
                 },
                 client::Connected::Audio(proto::AudioMessageHeader {
                     stream_idx,
@@ -152,6 +157,7 @@ pub(crate) enum ServerMessageFlat {
         n_bytes: u32,
     } = u32::from_le_bytes(*b"saud"),
     Disconnect = u32::from_le_bytes(*b"sded"),
+    Heartbeat = u32::from_le_bytes(*b"sliv"),
 }
 
 impl From<proto::message::Server> for ServerMessageFlat {
@@ -178,6 +184,7 @@ impl From<proto::message::Server> for ServerMessageFlat {
                             },
                         },
                     },
+                    server::Control::Heartbeat => Self::Heartbeat,
                 },
                 server::Connected::Audio(proto::AudioMessageHeader {
                     stream_idx,
@@ -226,6 +233,9 @@ impl From<ServerMessageFlat> for proto::message::Server {
                 stream_msg: proto::AudioStreamMessageHeader { byte_idx, n_bytes },
             })),
             ServerMessageFlat::Disconnect => Self::Disconnect,
+            ServerMessageFlat::Heartbeat => {
+                Self::Connected(server::Connected::Control(server::Control::Heartbeat))
+            }
         }
     }
 }
@@ -259,9 +269,9 @@ pub fn server_message_decode(slice: &[u8]) -> postcard::Result<(proto::message::
 }
 
 /// Utility for converting a `postcard` error into a [`std::io::Error`].
-/// 
+///
 /// This is primarily used at the UDP receive boundary, where deserialization
-/// failures must be reported using I/O–oriented error types.
+/// failures must be reported using IO–oriented error types.
 #[inline(always)]
 pub(crate) fn postcard_to_io_err(e: postcard::Error) -> std::io::Error {
     match e {
@@ -270,8 +280,8 @@ pub(crate) fn postcard_to_io_err(e: postcard::Error) -> std::io::Error {
     }
 }
 
-/// Returns `true` if the given I/O error kind represents a timeout condition.
-/// 
+/// Returns `true` if the given IO error kind represents a timeout condition.
+///
 /// This treats both `WouldBlock` and `TimedOut` as timeout-equivalent.
 #[inline(always)]
 pub(crate) fn io_err_is_timeout(e: std::io::ErrorKind) -> bool {
@@ -283,7 +293,7 @@ pub const AUDIO_STREAM_MESSAGE_HEADER_SIZE: usize = size_of::<u64>() + size_of::
 pub const AUDIO_MESSAGE_HEADER_SIZE: usize = AUDIO_STREAM_MESSAGE_HEADER_SIZE + size_of::<u32>();
 
 /// Trait encapsulating the behavior of a synchronous (i.e. blocking) UDP socket.
-/// 
+///
 /// We do this to allow easy integration of other, socket implementations, more flexible and
 /// performant than those of the standard library, notably `socket2`
 pub trait SyncUdpSock {
@@ -314,7 +324,7 @@ impl SyncUdpSock for std::net::UdpSocket {
 
         Ok((bytes_read, peer_addr, std::time::Instant::now()))
     }
-    
+
     fn set_recv_timeout(&self, timeout: Option<core::time::Duration>) -> std::io::Result<()> {
         self.set_read_timeout(timeout)
     }
