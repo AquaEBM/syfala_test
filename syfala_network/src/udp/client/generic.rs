@@ -1,11 +1,12 @@
 //! UDP client state machine for managing multiple servers.
 //!
 //! This module provides a synchronous (blocking), client that tracks server connections,
-//! handles IO lifecycle (start/stop requests and active audio), and anages per-server deadlines
+//! handles IO state (start/stop requests active audio), and manages per-server deadlines
 //! for timeout detection
 //!
 //! The implementation relies on typestate-based transitions and explicit
 //! state machines to model the server IO lifecycle.
+//! 
 //! Socket timeouts are used to periodically poll server deadlines and
 //! disconnect inactive servers.
 
@@ -28,6 +29,7 @@ use syfala_proto::message::{Client, Error, IOState, Server, client, server};
 /// Duration after which a server is considered disconnected if no valid
 /// message is received. Each successfully handled message refreshes the deadline.
 const CONN_TIMEOUT: core::time::Duration = core::time::Duration::from_millis(600);
+const MAX_SOCKET_TIMEOUT: core::time::Duration = core::time::Duration::from_millis(10);
 
 /// Temporary stack buffer size used to encode outgoing protocol messages.
 const ENCODE_BUF_LEN: usize = 2000;
@@ -35,28 +37,29 @@ const ENCODE_BUF_LEN: usize = 2000;
 /// Type alias representing the `Inactive` IO state for a given client context.
 ///
 /// Resolves to the associated `IOInactive` type of the `ClientContext`.
-pub type Inactive<Cx> = <Cx as ClientContext>::IOInactive;
+type Inactive<Cx> = <Cx as ClientContext>::IOInactive;
 
 /// Type alias representing the `StartPending` IO state for a given client context.
 ///
 /// Resolves to the associated `IOStartPending` type of the `Inactive` state.
-pub type StartPending<Cx> = <Inactive<Cx> as IOInactiveContext>::IOStartPending;
+type StartPending<Cx> = <Inactive<Cx> as IOInactiveContext>::IOStartPending;
 
 /// Type alias representing the `Active` IO state for a given client context.
 ///
 /// Resolves to the associated `IOActive` type of the `StartPending` state.
-pub type Active<Cx> = <StartPending<Cx> as IOStartPendingContext>::IOActive;
+type Active<Cx> = <StartPending<Cx> as IOStartPendingContext>::IOActive;
 
 /// Type alias representing the `StopPending` IO state for a given client context.
 ///
 /// Resolves to the associated `IOStopPending` type of the `Active` state.
-pub type StopPending<Cx> = <Active<Cx> as IOActiveContext>::IOStopPending;
+type StopPending<Cx> = <Active<Cx> as IOActiveContext>::IOStopPending;
 
-/// Represents the global client context which manages connections and per-server IO states.
+/// Represents the global client context which contains callbacks called on various
+/// client-size events
 ///
 /// This trait is implemented by the "application layer" client object, and provides:
-/// - The initial inactive IO state (`IOInactive`)
-/// - The ability to handle new server connections
+/// - The ability to handle new server connections, and return a nother callback manager
+/// for said connection
 pub trait ClientContext {
     /// A newly connected server with inactive IO.
     type IOInactive: IOInactiveContext<Context = Self>;
@@ -109,7 +112,7 @@ pub trait IOStartPendingContext: Sized {
     /// Called when the server permanently refuses the start request.
     ///
     /// Returns to the `Inactive` state, allowing the client to retry later.
-    fn start_io_refused(self, cx: &mut Self::Context) -> Inactive<Self::Context>;
+    fn start_io_refused(self, cx: &mut Self::Context) -> <Self::Context as ClientContext>::IOInactive;
 
     /// Called when the server reports a temporary failure to start IO.
     ///
@@ -160,7 +163,7 @@ pub trait IOStopPendingConxtext: Sized {
     /// Called when the server acknowledges the stop request successfully.
     ///
     /// Returns to the `Inactive` state.
-    fn stop_io(self, cx: &mut Self::Context) -> Inactive<Self::Context>;
+    fn stop_io(self, cx: &mut Self::Context) -> <Self::Context as ClientContext>::IOInactive;
 
     /// Called when the server permanently refuses the stop request.
     ///

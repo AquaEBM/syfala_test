@@ -5,7 +5,6 @@ pub trait SampleSize {
 }
 
 pub trait SampleFromBytes: SampleSize {
-    
     /// # Panics
     ///
     /// if `slice.len() != Self::SIZE`

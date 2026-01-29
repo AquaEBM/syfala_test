@@ -2,7 +2,7 @@ use core::{iter, mem, num, ptr};
 
 // One might argue this is a bit hacky
 
-/// Allows interleaving samples, from a set of jack ports,
+/// Allows interleaving samples from a set of jack ports,
 /// but allocates space for the pointers only once.
 /// (To avoid allocating in RT threads)
 #[repr(transparent)]
