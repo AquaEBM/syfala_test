@@ -6,8 +6,12 @@ edition = "2024"
 [dependencies]
 
 syfala_proto = { path = "../syfala_proto" }
-serde = { version = "1", default-features = false, features = [
-    "derive",
-    "alloc",
-] }
 postcard = { version = "1", features = ["use-std"] }
+rustc-hash = { version = "2", optional = true }
+priority-queue = { version = "2", optional = true }
+replace_with = { version = "0.1.6", optional = true }
+
+[features]
+
+default = ["generic"]
+generic = ["dep:priority-queue", "dep:rustc-hash", "dep:replace_with"]

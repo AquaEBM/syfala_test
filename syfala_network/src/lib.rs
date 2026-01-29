@@ -1,4 +1,4 @@
-//! Implementation of the message model defined in the `syfala_proto` crate.
+//! Implementation of the message model defined in the `proto` crate.
 //!
 //! This crate provides the runtime machinery needed to send and receive protocol
 //! messages over network sockets, along with lightweight abstractions for client and
@@ -12,85 +12,117 @@
 //!
 //! This crate is intentionally transport-focused: it does not redefine the
 //! protocol itself, but instead implements a concrete wire representation and
-//! communication layer for the message model described in `syfala_proto`.
+//! communication layer for the message model described in `proto`.
 
-pub mod server;
-pub mod client;
-pub use syfala_proto;
+pub mod udp;
 pub use postcard;
-pub use serde;
+pub use syfala_proto as proto;
 
-use serde::{Deserialize, Serialize};
+use proto::serde::{Deserialize, Serialize};
 
 // Internal types with flat enum representations so serde and postcard don't waste bandwidth
 // serializing/deserializing nested enums.
-// 
-// These enums remove structural nesting present in `syfala_proto::message` and instead
+//
+// These enums remove structural nesting present in `proto::message` and instead
 // encode each meaningful message variant directly as a single discriminant. This mirrors
 // the kind of layout flattening performed by the Rust compiler for in-memory enums, but
 // applied explicitly at the wire level.
-// 
+//
 // Callers of this library never see these types. They are used exclusively at the
 // serialization boundary in `{Client,Server}::{send,recv}`, and are converted to and from
 // the public protocol message types automatically.
-// 
-// See the relevant comment in `syfala_proto::message` for more.
+//
+// See the relevant comment in `proto::message` for more.
 
-// ------
+// NOTE: We specify discriminants explicitly, but we do not have to, we just do this to make
+// sure our packet format is stable, debuggable, and robust (1 byte discriminants are too
+// insecure)
 
 /// Flattened wire representation of client-to-server messages.
 ///
 /// This enum is a bandwidth-optimized counterpart to
-/// [`syfala_proto::message::Client`], with nested enums and empty payloads
+/// [`proto::message::Client`], with nested enums and empty payloads
 /// collapsed into distinct variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub(crate) enum ClientMessageFlat<'a> {
-    Connect,
-    ConnectionFailed,
-    ConnectionRefused,
-    StartIO,
-    StopIO,
-    Audio(#[serde(borrow)] syfala_proto::AudioData<'a>),
+#[serde(crate = "proto::serde")]
+#[repr(u32)]
+pub(crate) enum ClientMessageFlat {
+    Discovery = u32::from_le_bytes(*b"cdsc"),
+    ConnectionSuccess = u32::from_le_bytes(*b"ccok"),
+    ConnectionFailed = u32::from_le_bytes(*b"ccer"),
+    ConnectionRefused = u32::from_le_bytes(*b"ccrf"),
+    StartIO = u32::from_le_bytes(*b"csta"),
+    StopIO = u32::from_le_bytes(*b"csto"),
+    AudioHeader {
+        // None of that confusing varint business
+        #[serde(with = "postcard::fixint::le")]
+        stream_idx: u32,
+        #[serde(with = "postcard::fixint::le")]
+        byte_idx: u64,
+        #[serde(with = "postcard::fixint::le")]
+        n_bytes: u32,
+    } = u32::from_le_bytes(*b"caud"),
+    Disconnect = u32::from_le_bytes(*b"cded"),
 }
 
-impl<'a> From<syfala_proto::message::Client<'a>> for ClientMessageFlat<'a> {
-    #[inline(always)]
-    fn from(v: syfala_proto::message::Client<'a>) -> Self {
-        use syfala_proto::*;
-
+impl From<ClientMessageFlat> for proto::message::Client {
+    fn from(v: ClientMessageFlat) -> Self {
+        use proto::message::*;
         match v {
-            message::Client::Connect => Self::Connect,
-            message::Client::Connected(c) => match c {
-                message::client::Connected::Control(ctrl) => match ctrl {
-                    message::client::Control::RequestIOStateChange(s) => match s {
-                        message::IOState::Start(()) => Self::StartIO,
-                        message::IOState::Stop(()) => Self::StopIO,
-                    },
-                },
-                message::client::Connected::Audio(a) => Self::Audio(a),
-            },
-            message::Client::ConnectionError(e) => match e {
-                message::Error::Failure => Self::ConnectionFailed,
-                message::Error::Refusal => Self::ConnectionRefused,
-            },
+            ClientMessageFlat::Discovery => Self::Discovery,
+            ClientMessageFlat::StartIO => Self::Connected(client::Connected::Control(
+                client::Control::RequestIOStateChange(IOState::Start(())),
+            )),
+            ClientMessageFlat::StopIO => Self::Connected(client::Connected::Control(
+                client::Control::RequestIOStateChange(IOState::Stop(())),
+            )),
+            ClientMessageFlat::AudioHeader {
+                stream_idx,
+                byte_idx,
+                n_bytes,
+            } => Self::Connected(client::Connected::Audio(proto::AudioMessageHeader {
+                stream_idx,
+                stream_msg: proto::AudioStreamMessageHeader { byte_idx, n_bytes },
+            })),
+            ClientMessageFlat::ConnectionSuccess => Self::ConnectionResult(Ok(())),
+            ClientMessageFlat::ConnectionFailed => Self::ConnectionResult(Err(Error::Failure(()))),
+            ClientMessageFlat::ConnectionRefused => Self::ConnectionResult(Err(Error::Refusal(()))),
+            ClientMessageFlat::Disconnect => Self::Disconnect,
         }
     }
 }
 
-impl<'a> From<ClientMessageFlat<'a>> for syfala_proto::message::Client<'a> {
-    fn from(v: ClientMessageFlat<'a>) -> Self {
-        use syfala_proto::*;
+impl From<proto::message::Client> for ClientMessageFlat {
+    #[inline(always)]
+    fn from(v: proto::message::Client) -> Self {
+        use proto::message::*;
+
         match v {
-            ClientMessageFlat::Connect => Self::Connect,
-            ClientMessageFlat::ConnectionFailed => Self::ConnectionError(message::Error::Failure),
-            ClientMessageFlat::ConnectionRefused => Self::ConnectionError(message::Error::Refusal),
-            ClientMessageFlat::StartIO => Self::Connected(message::client::Connected::Control(
-                message::client::Control::RequestIOStateChange(message::IOState::Start(())),
-            )),
-            ClientMessageFlat::StopIO => Self::Connected(message::client::Connected::Control(
-                message::client::Control::RequestIOStateChange(message::IOState::Stop(())),
-            )),
-            ClientMessageFlat::Audio(a) => Self::Connected(message::client::Connected::Audio(a)),
+            Client::Discovery => Self::Discovery,
+            Client::Connected(c) => match c {
+                client::Connected::Control(ctrl) => match ctrl {
+                    client::Control::RequestIOStateChange(s) => match s {
+                        IOState::Start(()) => Self::StartIO,
+                        IOState::Stop(()) => Self::StopIO,
+                    },
+                },
+                client::Connected::Audio(proto::AudioMessageHeader {
+                    stream_idx,
+                    stream_msg: proto::AudioStreamMessageHeader { byte_idx, n_bytes },
+                }) => Self::AudioHeader {
+                    stream_idx,
+                    byte_idx,
+                    n_bytes,
+                },
+            },
+            Client::ConnectionResult(r) => match r {
+                Ok(()) => Self::ConnectionSuccess,
+                Err(e) => match e {
+                    Error::Failure(()) => Self::ConnectionFailed,
+                    Error::Refusal(()) => Self::ConnectionRefused,
+                },
+            },
+            Client::Disconnect => Self::Disconnect,
         }
     }
 }
@@ -98,121 +130,236 @@ impl<'a> From<ClientMessageFlat<'a>> for syfala_proto::message::Client<'a> {
 /// Flattened wire representation of server-to-client messages.
 ///
 /// This enum is a bandwidth-optimized counterpart to
-/// [`syfala_proto::message::Server`], with nested enums collapsed into distinct variants.
+/// [`proto::message::Server`], with nested enums collapsed into distinct variants.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub(crate) enum ServerMessageFlat<'a> {
-    Connect(syfala_proto::format::StreamFormats),
-    ConnectionFailed,
-    ConnectionRefused,
-    StartIOFailed,
-    StartIORefused,
-    StartIOSuccess,
-    StopIOFailed,
-    StopIORefused,
-    StopIOSuccess,
-    Audio(#[serde(borrow)] syfala_proto::AudioData<'a>),
+#[serde(crate = "proto::serde")]
+#[repr(u32)]
+pub(crate) enum ServerMessageFlat {
+    Connect(proto::format::StreamFormats) = u32::from_le_bytes(*b"scon"),
+    StartIOFailed = u32::from_le_bytes(*b"saif"),
+    StartIORefused = u32::from_le_bytes(*b"sair"),
+    StartIOSuccess = u32::from_le_bytes(*b"sais"),
+    StopIOFailed = u32::from_le_bytes(*b"soif"),
+    StopIORefused = u32::from_le_bytes(*b"soir"),
+    StopIOSuccess = u32::from_le_bytes(*b"sois"),
+    AudioHeader {
+        // None of that confusing varint business
+        #[serde(with = "postcard::fixint::le")]
+        stream_idx: u32,
+        #[serde(with = "postcard::fixint::le")]
+        byte_idx: u64,
+        #[serde(with = "postcard::fixint::le")]
+        n_bytes: u32,
+    } = u32::from_le_bytes(*b"saud"),
+    Disconnect = u32::from_le_bytes(*b"sded"),
 }
 
-impl<'a> From<syfala_proto::message::Server<'a>> for ServerMessageFlat<'a> {
-    fn from(v: syfala_proto::message::Server<'a>) -> Self {
-        use syfala_proto::*;
+impl From<proto::message::Server> for ServerMessageFlat {
+    fn from(v: proto::message::Server) -> Self {
+        use proto::message::*;
 
         match v {
-            message::Server::Connect(f) => Self::Connect(f),
-            message::Server::ConnectionError(e) => match e {
-                message::Error::Failure => Self::ConnectionFailed,
-                message::Error::Refusal => Self::ConnectionRefused,
-            },
-            message::Server::Connected(c) => match c {
-                message::server::Connected::Control(ctrl) => match ctrl {
-                    message::server::Control::IOStateChangeResult(s) => match s {
-                        message::IOState::Start(r) => match r {
+            Server::Connect(f) => Self::Connect(f),
+            Server::Connected(c) => match c {
+                server::Connected::Control(ctrl) => match ctrl {
+                    server::Control::IOStateChangeResult(s) => match s {
+                        IOState::Start(r) => match r {
                             Ok(()) => Self::StartIOSuccess,
                             Err(e) => match e {
-                                message::Error::Failure => Self::StartIOFailed,
-                                message::Error::Refusal => Self::StartIORefused,
+                                Error::Failure(_) => Self::StartIOFailed,
+                                Error::Refusal(_) => Self::StartIORefused,
                             },
                         },
-                        message::IOState::Stop(r) => match r {
+                        IOState::Stop(r) => match r {
                             Ok(()) => Self::StopIOSuccess,
                             Err(e) => match e {
-                                message::Error::Failure => Self::StopIOFailed,
-                                message::Error::Refusal => Self::StopIORefused,
+                                Error::Failure(_) => Self::StopIOFailed,
+                                Error::Refusal(_) => Self::StopIORefused,
                             },
                         },
                     },
                 },
-                message::server::Connected::Audio(a) => Self::Audio(a),
+                server::Connected::Audio(proto::AudioMessageHeader {
+                    stream_idx,
+                    stream_msg: proto::AudioStreamMessageHeader { byte_idx, n_bytes },
+                }) => Self::AudioHeader {
+                    stream_idx,
+                    byte_idx,
+                    n_bytes,
+                },
             },
+            Server::Disconnect => Self::Disconnect,
         }
     }
 }
 
-impl<'a> From<ServerMessageFlat<'a>> for syfala_proto::message::Server<'a> {
-    fn from(v: ServerMessageFlat<'a>) -> Self {
-        use syfala_proto::*;
+impl From<ServerMessageFlat> for proto::message::Server {
+    fn from(v: ServerMessageFlat) -> Self {
+        use proto::message::*;
 
         match v {
             ServerMessageFlat::Connect(f) => Self::Connect(f),
-            ServerMessageFlat::ConnectionFailed => Self::ConnectionError(message::Error::Failure),
-            ServerMessageFlat::ConnectionRefused => Self::ConnectionError(message::Error::Refusal),
-            ServerMessageFlat::StartIOFailed => Self::Connected(
-                message::server::Connected::Control(message::server::Control::IOStateChangeResult(
-                    message::IOState::Start(Err(message::Error::Failure)),
-                )),
-            ),
-            ServerMessageFlat::StartIORefused => Self::Connected(
-                message::server::Connected::Control(message::server::Control::IOStateChangeResult(
-                    message::IOState::Start(Err(message::Error::Refusal)),
-                )),
-            ),
-            ServerMessageFlat::StartIOSuccess => {
-                Self::Connected(message::server::Connected::Control(
-                    message::server::Control::IOStateChangeResult(message::IOState::Start(Ok(()))),
-                ))
-            }
-            ServerMessageFlat::StopIOFailed => Self::Connected(
-                message::server::Connected::Control(message::server::Control::IOStateChangeResult(
-                    message::IOState::Stop(Err(message::Error::Failure)),
-                )),
-            ),
-            ServerMessageFlat::StopIORefused => Self::Connected(
-                message::server::Connected::Control(message::server::Control::IOStateChangeResult(
-                    message::IOState::Stop(Err(message::Error::Refusal)),
-                )),
-            ),
-            ServerMessageFlat::StopIOSuccess => {
-                Self::Connected(message::server::Connected::Control(
-                    message::server::Control::IOStateChangeResult(message::IOState::Stop(Ok(()))),
-                ))
-            }
-            ServerMessageFlat::Audio(a) => Self::Connected(message::server::Connected::Audio(a)),
+            ServerMessageFlat::StartIOFailed => Self::Connected(server::Connected::Control(
+                server::Control::IOStateChangeResult(IOState::Start(Err(Error::Failure(())))),
+            )),
+            ServerMessageFlat::StartIORefused => Self::Connected(server::Connected::Control(
+                server::Control::IOStateChangeResult(IOState::Start(Err(Error::Refusal(())))),
+            )),
+            ServerMessageFlat::StartIOSuccess => Self::Connected(server::Connected::Control(
+                server::Control::IOStateChangeResult(IOState::Start(Ok(()))),
+            )),
+            ServerMessageFlat::StopIOFailed => Self::Connected(server::Connected::Control(
+                server::Control::IOStateChangeResult(IOState::Stop(Err(Error::Failure(())))),
+            )),
+            ServerMessageFlat::StopIORefused => Self::Connected(server::Connected::Control(
+                server::Control::IOStateChangeResult(IOState::Stop(Err(Error::Refusal(())))),
+            )),
+            ServerMessageFlat::StopIOSuccess => Self::Connected(server::Connected::Control(
+                server::Control::IOStateChangeResult(IOState::Stop(Ok(()))),
+            )),
+            ServerMessageFlat::AudioHeader {
+                stream_idx,
+                byte_idx,
+                n_bytes,
+            } => Self::Connected(server::Connected::Audio(proto::AudioMessageHeader {
+                stream_idx,
+                stream_msg: proto::AudioStreamMessageHeader { byte_idx, n_bytes },
+            })),
+            ServerMessageFlat::Disconnect => Self::Disconnect,
         }
     }
 }
 
-// ----
+/// Encodes a client message into a [`std::io::Write`]
+pub fn client_message_encode<W: std::io::Write>(
+    m: proto::message::Client,
+    w: W,
+) -> postcard::Result<W> {
+    postcard::to_io(&ClientMessageFlat::from(m), w)
+}
+
+/// Decodes a client message from a slice
+pub fn client_message_decode(slice: &[u8]) -> postcard::Result<(proto::message::Client, &[u8])> {
+    let mut d = postcard::Deserializer::from_bytes(slice);
+    crate::ClientMessageFlat::deserialize(&mut d).map(|m| (m.into(), d.finalize().unwrap()))
+}
+
+/// Encodes a server message into a [`std::io::Read`]
+pub fn server_message_encode<W: std::io::Write>(
+    m: proto::message::Server,
+    w: W,
+) -> Result<W, postcard::Error> {
+    postcard::to_io(&ServerMessageFlat::from(m), w)
+}
+
+/// Decodes a server message from a slice
+pub fn server_message_decode(slice: &[u8]) -> postcard::Result<(proto::message::Server, &[u8])> {
+    let mut d = postcard::Deserializer::from_bytes(slice);
+    crate::ServerMessageFlat::deserialize(&mut d).map(|m| (m.into(), d.finalize().unwrap()))
+}
 
 /// Utility for converting a `postcard` error into a [`std::io::Error`].
-///
+/// 
 /// This is primarily used at the UDP receive boundary, where deserialization
 /// failures must be reported using I/O–oriented error types.
 #[inline(always)]
 pub(crate) fn postcard_to_io_err(e: postcard::Error) -> std::io::Error {
     match e {
-        postcard::Error::DeserializeUnexpectedEnd => {
-            std::io::ErrorKind::UnexpectedEof.into()
-        }
+        postcard::Error::DeserializeUnexpectedEnd => std::io::ErrorKind::UnexpectedEof.into(),
         _ => std::io::ErrorKind::Other.into(),
     }
 }
 
 /// Returns `true` if the given I/O error kind represents a timeout condition.
-///
-/// This treats both `WouldBlock` and `TimedOut` as timeout-equivalent, which
-/// is useful when working with non-blocking or socket-based transports.
+/// 
+/// This treats both `WouldBlock` and `TimedOut` as timeout-equivalent.
 #[inline(always)]
 pub(crate) fn io_err_is_timeout(e: std::io::ErrorKind) -> bool {
     use std::io::ErrorKind::*;
     [WouldBlock, TimedOut].contains(&e)
+}
+
+pub const AUDIO_STREAM_MESSAGE_HEADER_SIZE: usize = size_of::<u64>() + size_of::<u32>();
+pub const AUDIO_MESSAGE_HEADER_SIZE: usize = AUDIO_STREAM_MESSAGE_HEADER_SIZE + size_of::<u32>();
+
+pub trait UdpSock {
+    fn send(&self, bytes: &[u8], dest_addr: core::net::SocketAddr) -> std::io::Result<()>;
+
+    fn recv(
+        &self,
+        bytes: &mut [u8],
+    ) -> std::io::Result<(usize, core::net::SocketAddr, std::time::Instant)>;
+
+    fn set_recv_timeout(&self, timeout: Option<core::time::Duration>) -> std::io::Result<()>;
+}
+
+impl UdpSock for std::net::UdpSocket {
+    fn send(&self, bytes: &[u8], dest_addr: core::net::SocketAddr) -> std::io::Result<()> {
+        self.send_to(bytes, dest_addr).and_then(|n| {
+            (n == bytes.len())
+                .then_some(())
+                .ok_or(std::io::ErrorKind::FileTooLarge.into())
+        })
+    }
+
+    fn recv(
+        &self,
+        bytes: &mut [u8],
+    ) -> std::io::Result<(usize, core::net::SocketAddr, std::time::Instant)> {
+        let (bytes_read, peer_addr) = self.recv_from(bytes)?;
+
+        Ok((bytes_read, peer_addr, std::time::Instant::now()))
+    }
+    
+    fn set_recv_timeout(&self, timeout: Option<core::time::Duration>) -> std::io::Result<()> {
+        self.set_read_timeout(timeout)
+    }
+}
+
+/// A lightweight wrapper around [`std::time::Instant`] used to track timeouts.
+/// Stores the instant at which the timer was last reset.
+///
+/// This type is primarily intended for implementing heartbeat or inactivity
+/// timeouts in connection-like protocols built on top of UDP or other
+/// connectionless transports.
+///
+/// ```ignore
+/// let mut timer = ConnectionTimer::new();
+///
+/// // we have received a message from the peer.
+/// timer.reset();
+///
+/// if timer.elapsed() > TIMEOUT {
+///     // consider the peer disconnected
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ConnectionTimer(std::time::Instant);
+
+impl Default for ConnectionTimer {
+    fn default() -> Self {
+        Self(std::time::Instant::now())
+    }
+}
+
+impl ConnectionTimer {
+    /// Creates a new timer starting at the current instant.
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self(std::time::Instant::now())
+    }
+
+    /// Resets the timer to start measuring elapsed time from now.
+    ///
+    /// This discards any previously accumulated elapsed duration.
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        *self = Self::new()
+    }
+
+    /// Returns the amount of time elapsed since the last reset.
+    #[inline(always)]
+    pub fn elapsed(&self) -> core::time::Duration {
+        self.0.elapsed()
+    }
 }

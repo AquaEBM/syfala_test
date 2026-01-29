@@ -127,7 +127,7 @@ fn linear_remap(
 #[inline(always)]
 fn volume_control_db_val(index: usize) -> Option<Float32> {
     OUTPUT_VOLUME.get(index).map(|v| {
-        // WE DO NOT use clamp to because this pattern kills NANs
+        // WE DO NOT use clamp to because clamp propagates NANs
         gain_to_db(v.load(Ordering::Relaxed))
             .min(VOL_MAX_DB)
             .max(VOL_MIN_DB)
@@ -161,12 +161,13 @@ fn db_to_norm(db: Float32) -> Float32 {
 #[repr(transparent)] // <- important
 struct AlwaysSync<T: ?Sized>(T);
 
-#[repr(transparent)]
+#[repr(transparent)] // also important
 struct PropAddr(AudioObjectPropertyAddress);
 
 impl PropAddr {
     #[inline(always)]
     const fn from_ref(r: &AudioObjectPropertyAddress) -> &Self {
+        // SAFETY: we are transparent
         unsafe { mem::transmute(r) }
     }
 }
@@ -240,7 +241,7 @@ const DEVICE_UID: &str = "UID";
 
 const DEVICE_MODEL_UID: &str = "ModelUID";
 
-// How often should CoreAudio query timestamps (and, if necessary, apply drift correction)?
+// How often should CoreAudio query timestamps?
 const TIMESTAMP_PERIOD_NANOSECS: u64 = 500_000_000;
 const FRAMES_PER_TIMESTAMP: u32 =
     (TIMESTAMP_PERIOD_NANOSECS as f64 * SAMPLE_RATE / 1e9 + 0.5) as u32;

@@ -72,3 +72,5 @@ reordering.
 
 The types in this crate already implement `serde`'s `Serialize` and `Deserialize`
 traits, for the user to conveniently plug into other `serde` backends.
+
+TODO: missing heartbeat messages

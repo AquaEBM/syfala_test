@@ -1,43 +1,41 @@
-use core::{cell::OnceCell, num};
+use core::cell;
+
+pub use syfala_network as network;
+pub use syfala_utils as utils;
 
 mod interleaver;
 
-// We might have to do some manual encoding/decoding here, sadly.
-// Let's hope postcard and our utilities crate can help...
+/// The only format supported by JACK
+pub const JACK_SAMPLE_TYPE: network::proto::format::SampleType =
+    network::proto::format::SampleType::IEEF32;
 
-const SAMPLE_SIZE: num::NonZeroUsize = num::NonZeroUsize::new(size_of::<f32>()).unwrap();
+pub type JackSample = f32;
 
-/// Wraps a [`syfala_utils::MultichannelTx`] alongside an [`interleaver::Interleaver<AudioIn>`]
-/// 
-/// Used in [`DuplexProcessHandler`]
-pub struct JackMultichannelTx {
-    tx: syfala_utils::queue::rtrb::Producer<u8>,
+pub struct JackTx<C> {
     interleaver: Box<interleaver::Interleaver<jack::AudioIn>>,
+    tx: utils::queue::IndexedTx<C, JackSample>,
 }
 
-impl JackMultichannelTx {
+impl<C> JackTx<C> {
     pub fn new(
         ports: impl IntoIterator<Item = jack::Port<jack::AudioIn>>,
-        tx: syfala_utils::queue::rtrb::Producer<u8>,
+        tx: utils::queue::IndexedTx<C, JackSample>,
     ) -> Option<Self> {
         let interleaver = interleaver::Interleaver::new(ports)?;
 
-        Some(Self { tx, interleaver })
+        Some(Self { interleaver, tx })
     }
 }
 
-/// Wraps a [`syfala_utils::MultichannelRx`] alongside an [`interleaver::Interleaver<AudioOut>`]
-///
-/// Used in [`DuplexProcessHandler`].
-pub struct JackMultichannelRx {
-    rx: syfala_utils::queue::rtrb::Consumer<u8>,
+pub struct JackRx<C> {
+    rx: utils::queue::IndexedRx<C, JackSample>,
     interleaver: Box<interleaver::Interleaver<jack::AudioOut>>,
 }
 
-impl JackMultichannelRx {
+impl<C> JackRx<C> {
     pub fn new(
         ports: impl IntoIterator<Item = jack::Port<jack::AudioOut>>,
-        rx: syfala_utils::queue::rtrb::Consumer<u8>,
+        rx: utils::queue::IndexedRx<C, JackSample>,
     ) -> Option<Self> {
         let interleaver = interleaver::Interleaver::new(ports)?;
 
@@ -45,33 +43,52 @@ impl JackMultichannelRx {
     }
 }
 
-// TODO: replace the old ProcessSender and ProcessReceiver with this big boi
-
-pub struct DuplexProcessHandler {
-    txs: Box<[JackMultichannelTx]>,
-    rxs: Box<[JackMultichannelRx]>,
-    current_frame_idx: OnceCell<u64>,
+pub struct DuplexProcessHandler<C> {
+    txs: Box<[JackTx<C>]>,
+    rxs: Box<[JackRx<C>]>,
+    start_frame_idx: cell::OnceCell<u64>,
 }
 
-impl jack::ProcessHandler for DuplexProcessHandler {
+impl<C> DuplexProcessHandler<C> {
+    #[inline(always)]
+    pub fn new(
+        inputs: impl IntoIterator<Item = JackTx<C>>,
+        outputs: impl IntoIterator<Item = JackRx<C>>,
+    ) -> Self {
+        Self {
+            txs: inputs.into_iter().collect(),
+            rxs: outputs.into_iter().collect(),
+            start_frame_idx: cell::OnceCell::new(),
+        }
+    }
+}
+
+impl<C: Send + utils::queue::Counter> jack::ProcessHandler for DuplexProcessHandler<C> {
     fn process(&mut self, _client: &jack::Client, scope: &jack::ProcessScope) -> jack::Control {
-        let frame_idx = u64::from(scope.last_frame_time());
-        let n_frames = scope.n_frames();
+        // Beware: at the time of writing, in Pipewire's JACK shim, this
+        // counter is completely unreliable, (can decrease or jump randomly)
+        let this_cycle_frame_idx = u64::from(scope.last_frame_time());
+        let &first_cycle_frame_idx = self.start_frame_idx.get_or_init(|| this_cycle_frame_idx);
 
-        for JackMultichannelTx { tx, interleaver } in &mut self.txs {
-            let n_channels = interleaver.len();
-            let frame_size_bytes = SAMPLE_SIZE.checked_mul(n_channels).unwrap();
-            let n_bytes_total = frame_size_bytes.get().checked_mul(n_frames.try_into().unwrap());
+        let frame_idx = this_cycle_frame_idx.strict_sub(first_cycle_frame_idx);
 
-            let mut chunk = syfala_utils::queue::producer_get_all(tx);
-
-            let writer = syfala_utils::queue::chunk_get_writer(&mut chunk);
-
-            
+        for JackTx { tx, interleaver } in self.txs.iter_mut() {
+            let spl_idx = frame_idx.strict_mul(interleaver.n_ports().get().try_into().unwrap());
+            tx.send(spl_idx, interleaver.interleave(scope).copied(), || 0.);
         }
 
-        // TODO...
+        for JackRx { rx, interleaver } in &mut self.rxs {
+            let spl_idx = frame_idx.strict_mul(interleaver.n_ports().get().try_into().unwrap());
+            for (dest, src) in interleaver.interleave(scope).zip(rx.recv(spl_idx, || 0.)) {
+                *dest = src
+            }
+        }
 
+        jack::Control::Continue
+    }
+
+    // TODO: do something here that disconnects from all clients, and restarts with a new buffer size
+    fn buffer_size(&mut self, _: &jack::Client, _size: jack::Frames) -> jack::Control {
         jack::Control::Continue
     }
 }

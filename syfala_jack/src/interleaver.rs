@@ -1,10 +1,12 @@
 use core::{iter, mem, num, ptr};
 
+// One might argue this is a bit hacky
+
 /// Allows interleaving samples, from a set of jack ports,
 /// but allocates space for the pointers only once.
 /// (To avoid allocating in RT threads)
 #[repr(transparent)]
-pub struct Interleaver<Spec> {
+pub(crate) struct Interleaver<Spec> {
     ptrs: [(jack::Port<Spec>, ptr::NonNull<f32>)],
 }
 
@@ -13,36 +15,35 @@ unsafe impl<Spec> Send for Interleaver<Spec> {}
 
 impl<Spec> Interleaver<Spec> {
     #[inline(always)]
-    pub fn new(ports: impl IntoIterator<Item = jack::Port<Spec>>) -> Option<Box<Self>> {
+    pub(crate) fn new(ports: impl IntoIterator<Item = jack::Port<Spec>>) -> Option<Box<Self>> {
         let boxed_slice = Box::from_iter(iter::zip(
             ports,
             iter::repeat_with(ptr::NonNull::<f32>::dangling),
         ));
 
-        if boxed_slice.len() == 0 {
-            return None;
-        }
+        // check if the length is valid
+        let _len = num::NonZeroU32::new(boxed_slice.len().try_into().ok()?)?;
 
         // SAFETY: We are a `#[repr(transparent)]` struct
         Some(unsafe { mem::transmute(boxed_slice) })
     }
 
     #[inline(always)]
-    pub fn len(&self) -> num::NonZeroUsize {
+    pub(crate) fn n_ports(&self) -> num::NonZeroU32 {
         // we return none when we create an interleaver with a channel count of 0
-        num::NonZeroUsize::new(self.ptrs.len()).unwrap()
+        // or when it's length exceeds u32::MAX
+        num::NonZeroU32::new(self.ptrs.len().try_into().unwrap()).unwrap()
     }
 }
 
 // See this: (https://predr.ag/blog/definitive-guide-to-sealed-traits-in-rust/)
-
 mod private {
-    pub trait Sealed {}
+    pub(crate) trait Sealed {}
     impl Sealed for jack::AudioIn {}
     impl Sealed for jack::AudioOut {}
 }
 
-pub trait ToJackPointer: private::Sealed {
+pub(crate) trait ToJackPointer: private::Sealed {
     fn to_jack_buf_ptr(
         port: &mut jack::Port<Self>,
         scope: &jack::ProcessScope,
@@ -71,7 +72,7 @@ impl ToJackPointer for jack::AudioOut {
     }
 }
 
-pub trait FromJackPointer: private::Sealed {
+pub(crate) trait FromJackPointer: private::Sealed {
     type Output<'a>;
     unsafe fn get_ref<'a>(ptr: ptr::NonNull<f32>) -> Self::Output<'a>;
 }
@@ -81,6 +82,7 @@ impl FromJackPointer for jack::AudioIn {
 
     #[inline(always)]
     unsafe fn get_ref<'a>(ptr: ptr::NonNull<f32>) -> Self::Output<'a> {
+        // SAFETY: ensured by the caller
         unsafe { ptr.as_ref() }
     }
 }
@@ -90,13 +92,14 @@ impl FromJackPointer for jack::AudioOut {
 
     #[inline(always)]
     unsafe fn get_ref<'a>(mut ptr: ptr::NonNull<f32>) -> Self::Output<'a> {
+        // SAFETY: ensured by the caller
         unsafe { ptr.as_mut() }
     }
 }
 
 impl<Spec: FromJackPointer + ToJackPointer> Interleaver<Spec> {
     #[inline(always)]
-    pub fn interleave(
+    pub(crate) fn interleave(
         &mut self,
         process_scope: &jack::ProcessScope,
     ) -> impl ExactSizeIterator<Item = Spec::Output<'_>> {
@@ -116,7 +119,7 @@ impl<Spec: FromJackPointer + ToJackPointer> Interleaver<Spec> {
     }
 }
 
-pub struct Interleaved<'a, Spec> {
+pub(crate) struct Interleaved<'a, Spec> {
     remaining_frames: usize,
     current_index: usize,
     ptrs: &'a mut [(jack::Port<Spec>, ptr::NonNull<f32>)],
@@ -138,12 +141,14 @@ impl<'a, Spec: FromJackPointer> Iterator for Interleaved<'a, Spec> {
         // SAFETY: happens at most remaining_frames times
         // ensuring we're within the buffer's bounds
         *ptr_ref = unsafe { ptr_ref.add(1) };
-        // SAFETY: never overflows
-        self.current_index = unsafe { self.current_index.unchecked_add(1) };
+        // never panics, is always less or equal to self.ptrs.len()
+        self.current_index = self.current_index.strict_add(1);
         if self.current_index == self.ptrs.len() {
             self.current_index = 0;
+            // never panics, we just checked that self.remaining_frames != 0
             self.remaining_frames = self.remaining_frames.strict_sub(1);
         }
+        // SAFETY: we point to a valid JACK buffer pointer
         Some(unsafe { Spec::get_ref(ptr) })
     }
 

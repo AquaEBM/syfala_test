@@ -12,7 +12,8 @@ Multiple implementations of this protocol, for different backends, can be found 
 
  - [`syfala_utils`](syfala_utils) A bunch of small utilities used throughout the rest of the crates in this repository.
  - [`syfala_proto`](syfala_proto) Type-based definitions of the protocol and it's communication model.
- - [`syfala_network`](syfala_network) Basic types implementing the protocol for different network protocols (currently only UDP).
+ - [`syfala_network`](syfala_network) Basic types implementing the protocol for different network protocols (currently only UDP). Also contains a typestate-based implementation, to easily implemnent the protocol for
+ different backends.
 
 ### Backends
 
