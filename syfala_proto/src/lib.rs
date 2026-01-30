@@ -1,8 +1,8 @@
 #![no_std]
 //! A simple, low-latency protocol for real-time audio communication and discovery.
 //! 
-//! This crate defines a message-based protocol intended for real-time audio
-//! streaming between networked endpoints.
+//! This crate defines a protocol intended for real-time audio streaming between networked
+//! endpoints.
 //! 
 //! ## Roles
 //! 

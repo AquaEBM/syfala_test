@@ -34,7 +34,7 @@ pub mod client {
         /// Requests a change in the audio IO state.
         ///
         /// # Note
-        /// 
+        ///
         /// When starting IO, both sides must expect **all** advertised input
         /// and output streams to become active _simultaneously_, and for as long as IO is active.
         RequestIOStateChange(IOState),
@@ -68,6 +68,24 @@ pub enum Client {
     Disconnect,
 }
 
+impl Client {
+    pub const HEARTBEAT: Self =
+        Self::Connected(client::Connected::Control(client::Control::Heartbeat));
+    pub const START_IO: Self = Self::Connected(client::Connected::Control(
+        client::Control::RequestIOStateChange(IOState::Start(())),
+    ));
+    pub const STOP_IO: Self = Self::Connected(client::Connected::Control(
+        client::Control::RequestIOStateChange(IOState::Stop(())),
+    ));
+    pub const CONN_SUCCESS: Self = Self::ConnectionResult(Ok(()));
+    pub const CONN_FAILED: Self = Self::ConnectionResult(Err(Error::Failure(())));
+    pub const CONN_REFUSED: Self = Self::ConnectionResult(Err(Error::Refusal(())));
+
+    pub const fn audio(header: crate::AudioMessageHeader) -> Self {
+        Self::Connected(client::Connected::Audio(header))
+    }
+}
+
 pub mod server {
     use super::*;
 
@@ -96,11 +114,38 @@ pub mod server {
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum Server {
     /// Requests to connect to a (assumed to be known) client.
-    /// 
+    ///
     /// Do not send this over broadcast addresses.
     Connect(crate::format::StreamFormats),
     /// Messages sent after a connection is established.
     Connected(server::Connected),
     /// Sent to indicate that a connection has been terminated.
     Disconnect,
+}
+
+impl Server {
+    pub const HEARTBEAT: Self =
+        Self::Connected(server::Connected::Control(server::Control::Heartbeat));
+    pub const START_IO_OK: Self = Self::Connected(server::Connected::Control(
+        server::Control::IOStateChangeResult(IOState::Start(Ok(()))),
+    ));
+    pub const START_IO_FAILED: Self = Self::Connected(server::Connected::Control(
+        server::Control::IOStateChangeResult(IOState::Start(Err(Error::Failure(())))),
+    ));
+    pub const START_IO_REFUSED: Self = Self::Connected(server::Connected::Control(
+        server::Control::IOStateChangeResult(IOState::Start(Err(Error::Refusal(())))),
+    ));
+    pub const STOP_IO_OK: Self = Self::Connected(server::Connected::Control(
+        server::Control::IOStateChangeResult(IOState::Stop(Ok(()))),
+    ));
+    pub const STOP_IO_FAILED: Self = Self::Connected(server::Connected::Control(
+        server::Control::IOStateChangeResult(IOState::Stop(Err(Error::Failure(())))),
+    ));
+    pub const STOP_IO_REFUSED: Self = Self::Connected(server::Connected::Control(
+        server::Control::IOStateChangeResult(IOState::Stop(Err(Error::Refusal(())))),
+    ));
+
+    pub const fn audio(header: crate::AudioMessageHeader) -> Self {
+        Server::Connected(server::Connected::Audio(header))
+    }
 }

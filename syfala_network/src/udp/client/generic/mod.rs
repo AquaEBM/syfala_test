@@ -10,13 +10,13 @@
 //! Socket timeouts are used to periodically poll server deadlines and
 //! disconnect inactive servers.
 
-use super::{
-    ClientContext, IOActiveContext, IOInactiveContext, IOStartPendingContext,
-    IOStopPendingConxtext, ServerIOState,
-};
+mod state;
 use core::cmp;
-use replace_with::replace_with_or_abort;
+use replace_with::{replace_with_or_abort, replace_with_or_abort_and_return};
 use rustc_hash::FxBuildHasher;
+use state::{
+    ClientContext, IOActiveContext, IOInactiveContext, IOStartPendingContext, IOStopPendingConxtext,
+};
 use syfala_proto::message::{Client, Error, IOState, Server, client, server};
 
 /// Hash map storing per-server state, keyed by socket address.
@@ -28,10 +28,29 @@ type ServerPQ<V> = priority_queue::PriorityQueue<core::net::SocketAddr, V, FxBui
 /// Duration after which a server is considered disconnected if no valid
 /// message is received. Each successfully handled message refreshes the deadline.
 const CONN_TIMEOUT: core::time::Duration = core::time::Duration::from_millis(600);
-const MAX_SOCKET_TIMEOUT: core::time::Duration = core::time::Duration::from_millis(10);
+/// the delay between subsequent retries of client request polls
+const REQUEST_POLL_PERIOD: core::time::Duration = core::time::Duration::from_millis(10);
 
 /// Temporary stack buffer size used to encode outgoing protocol messages.
 const ENCODE_BUF_LEN: usize = 2000;
+
+// Note: Comments that should be logs are marked with (*)
+
+/// Represents the IO state machine for a connected server.
+///
+/// This enum wraps the different typestate objects representing:
+/// - Inactive IO
+/// - Pending start request
+/// - Active IO
+/// - Pending stop request
+///
+/// All state transitions are driven by incoming messages or application requests.
+enum ServerIOState<Cx: ClientContext + ?Sized> {
+    Inactive(state::Inactive<Cx>),
+    PendingStart(state::StartPending<Cx>),
+    Active(state::Active<Cx>),
+    PendingStop(state::StopPending<Cx>),
+}
 
 // TODO: replace all comments marked with (*) with logs
 
@@ -165,6 +184,7 @@ pub struct GenericClient<C: ClientContext> {
     deadlines: ServerPQ<cmp::Reverse<std::time::Instant>>,
     /// Per-server state machine storage.
     servers: ServerMap<ServerIOState<C>>,
+    retry_deadline: Option<std::time::Instant>,
     /// User-provided callbacks defining connection, IO, and audio behavior.
     callbacks: C,
 }
@@ -179,6 +199,7 @@ impl<C: ClientContext> GenericClient<C> {
             callbacks,
             deadlines: ServerPQ::with_hasher(FxBuildHasher),
             servers: ServerMap::with_hasher(FxBuildHasher),
+            retry_deadline: None,
         }
     }
 
@@ -258,11 +279,7 @@ impl<C: ClientContext> GenericClient<C> {
 
         Ok(())
     }
-}
 
-// NIGHTLY: #[feature(map_try_insert)] use that where possible
-
-impl<C: ClientContext> super::Client for GenericClient<C> {
     /// Handles an incoming UDP message (or lack thereof).
     fn on_message(
         &mut self,
@@ -274,20 +291,6 @@ impl<C: ClientContext> super::Client for GenericClient<C> {
         match maybe_msg {
             Some(msg) => self.on_decoded_message(sock, addr, timestamp, msg)?,
             None => self.callbacks.unknown_message(addr),
-        }
-
-        for (_addr, state) in &mut self.servers {
-            replace_with_or_abort(state, |s| match s {
-                ServerIOState::Inactive(s) => match s.poll_start_io(&mut self.callbacks) {
-                    Ok(s) => ServerIOState::PendingStart(s),
-                    Err(s) => ServerIOState::Inactive(s),
-                },
-                ServerIOState::Active(s) => match s.poll_stop_io(&mut self.callbacks) {
-                    Ok(s) => ServerIOState::PendingStop(s),
-                    Err(s) => ServerIOState::Active(s),
-                },
-                state => state,
-            });
         }
 
         Ok(())
@@ -312,12 +315,45 @@ impl<C: ClientContext> super::Client for GenericClient<C> {
             self.servers.remove(&addr).unwrap();
         }
 
+        // Manage incoming application requests, and retrying pending server requests
+        let mut encode_buf = [0; 200];
+
+        for (addr, state) in &mut self.servers {
+            replace_with_or_abort_and_return(state, |s| match s {
+                ServerIOState::Inactive(s) => match s.poll_start_io(&mut self.callbacks) {
+                    Ok(s) => {
+                        // (*) start IO requested by client for the server at addr
+                        (
+                            sock.send_msg(Client::START_IO, *addr, &mut encode_buf),
+                            ServerIOState::PendingStart(s),
+                        )
+                    }
+                    Err(s) => (Ok(()), ServerIOState::Inactive(s)),
+                },
+                ServerIOState::Active(s) => match s.poll_stop_io(&mut self.callbacks) {
+                    Ok(s) => {
+                        // (*) stop IO requested by client for the server at addr
+                        (
+                            sock.send_msg(Client::START_IO, *addr, &mut encode_buf),
+                            ServerIOState::PendingStop(s),
+                        )
+                    }
+                    Err(s) => (Ok(()), ServerIOState::Active(s)),
+                },
+                state => (Ok(()), state),
+            })?;
+        }
+
+        let min_timeout = REQUEST_POLL_PERIOD.min(CONN_TIMEOUT);
+
         sock.set_recv_timeout(
             self.deadlines
                 .peek()
                 .map(|(_, cmp::Reverse(next))| next.saturating_duration_since(now))
-                .map(|t| t.min(MAX_SOCKET_TIMEOUT)),
+                .map(|t| t.min(REQUEST_POLL_PERIOD).min(CONN_TIMEOUT)),
+                
         )?;
+
         Ok(())
     }
 }

@@ -68,30 +68,23 @@ pub(crate) enum ClientMessageFlat {
 
 impl From<ClientMessageFlat> for proto::message::Client {
     fn from(v: ClientMessageFlat) -> Self {
-        use proto::message::*;
         match v {
             ClientMessageFlat::Discovery => Self::Discovery,
-            ClientMessageFlat::StartIO => Self::Connected(client::Connected::Control(
-                client::Control::RequestIOStateChange(IOState::Start(())),
-            )),
-            ClientMessageFlat::StopIO => Self::Connected(client::Connected::Control(
-                client::Control::RequestIOStateChange(IOState::Stop(())),
-            )),
+            ClientMessageFlat::StartIO => Self::START_IO,
+            ClientMessageFlat::StopIO => Self::STOP_IO,
             ClientMessageFlat::AudioHeader {
                 stream_idx,
                 byte_idx,
                 n_bytes,
-            } => Self::Connected(client::Connected::Audio(proto::AudioMessageHeader {
+            } => Self::audio(proto::AudioMessageHeader {
                 stream_idx,
                 stream_msg: proto::AudioStreamMessageHeader { byte_idx, n_bytes },
-            })),
-            ClientMessageFlat::ConnectionSuccess => Self::ConnectionResult(Ok(())),
-            ClientMessageFlat::ConnectionFailed => Self::ConnectionResult(Err(Error::Failure(()))),
-            ClientMessageFlat::ConnectionRefused => Self::ConnectionResult(Err(Error::Refusal(()))),
+            }),
+            ClientMessageFlat::ConnectionSuccess => Self::CONN_SUCCESS,
+            ClientMessageFlat::ConnectionFailed => Self::CONN_FAILED,
+            ClientMessageFlat::ConnectionRefused => Self::CONN_REFUSED,
             ClientMessageFlat::Disconnect => Self::Disconnect,
-            ClientMessageFlat::Heartbeat => {
-                Self::Connected(client::Connected::Control(client::Control::Heartbeat))
-            }
+            ClientMessageFlat::Heartbeat => Self::HEARTBEAT,
         }
     }
 }
@@ -160,6 +153,31 @@ pub(crate) enum ServerMessageFlat {
     Heartbeat = u32::from_le_bytes(*b"sliv"),
 }
 
+impl From<ServerMessageFlat> for proto::message::Server {
+    fn from(v: ServerMessageFlat) -> Self {
+
+        match v {
+            ServerMessageFlat::Connect(f) => Self::Connect(f),
+            ServerMessageFlat::StartIOFailed => Self::START_IO_FAILED,
+            ServerMessageFlat::StartIORefused => Self::START_IO_REFUSED,
+            ServerMessageFlat::StartIOSuccess => Self::START_IO_OK,
+            ServerMessageFlat::StopIOFailed => Self::STOP_IO_FAILED,
+            ServerMessageFlat::StopIORefused => Self::STOP_IO_REFUSED,
+            ServerMessageFlat::StopIOSuccess => Self::STOP_IO_OK,
+            ServerMessageFlat::AudioHeader {
+                stream_idx,
+                byte_idx,
+                n_bytes,
+            } => Self::audio(proto::AudioMessageHeader {
+                stream_idx,
+                stream_msg: proto::AudioStreamMessageHeader { byte_idx, n_bytes },
+            }),
+            ServerMessageFlat::Disconnect => Self::Disconnect,
+            ServerMessageFlat::Heartbeat => Self::HEARTBEAT,
+        }
+    }
+}
+
 impl From<proto::message::Server> for ServerMessageFlat {
     fn from(v: proto::message::Server) -> Self {
         use proto::message::*;
@@ -196,46 +214,6 @@ impl From<proto::message::Server> for ServerMessageFlat {
                 },
             },
             Server::Disconnect => Self::Disconnect,
-        }
-    }
-}
-
-impl From<ServerMessageFlat> for proto::message::Server {
-    fn from(v: ServerMessageFlat) -> Self {
-        use proto::message::*;
-
-        match v {
-            ServerMessageFlat::Connect(f) => Self::Connect(f),
-            ServerMessageFlat::StartIOFailed => Self::Connected(server::Connected::Control(
-                server::Control::IOStateChangeResult(IOState::Start(Err(Error::Failure(())))),
-            )),
-            ServerMessageFlat::StartIORefused => Self::Connected(server::Connected::Control(
-                server::Control::IOStateChangeResult(IOState::Start(Err(Error::Refusal(())))),
-            )),
-            ServerMessageFlat::StartIOSuccess => Self::Connected(server::Connected::Control(
-                server::Control::IOStateChangeResult(IOState::Start(Ok(()))),
-            )),
-            ServerMessageFlat::StopIOFailed => Self::Connected(server::Connected::Control(
-                server::Control::IOStateChangeResult(IOState::Stop(Err(Error::Failure(())))),
-            )),
-            ServerMessageFlat::StopIORefused => Self::Connected(server::Connected::Control(
-                server::Control::IOStateChangeResult(IOState::Stop(Err(Error::Refusal(())))),
-            )),
-            ServerMessageFlat::StopIOSuccess => Self::Connected(server::Connected::Control(
-                server::Control::IOStateChangeResult(IOState::Stop(Ok(()))),
-            )),
-            ServerMessageFlat::AudioHeader {
-                stream_idx,
-                byte_idx,
-                n_bytes,
-            } => Self::Connected(server::Connected::Audio(proto::AudioMessageHeader {
-                stream_idx,
-                stream_msg: proto::AudioStreamMessageHeader { byte_idx, n_bytes },
-            })),
-            ServerMessageFlat::Disconnect => Self::Disconnect,
-            ServerMessageFlat::Heartbeat => {
-                Self::Connected(server::Connected::Control(server::Control::Heartbeat))
-            }
         }
     }
 }

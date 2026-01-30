@@ -6,11 +6,8 @@ use serde::{Deserialize, Serialize};
 
 /// Supported sample formats.
 ///
-/// All samples are assumed to be:
-/// - Packed (no unused bytes)
-/// - Little-endian
-/// - Interleaved
-/// - Uncompressed
+/// All samples are assumed to be packed (no unused bytes), little-endian, interleaved, and
+/// uncompressed
 #[derive(Clone, Copy, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
 pub enum SampleType {
     U8,
@@ -121,6 +118,7 @@ pub struct Format {
     /// This value is advisory and does not constrain packet sizes.
     /// 
     /// If it is zero, then it must be considered as not provided.
+    // TODO: move this value to StartIO messages...
     pub buffer_size: BufferSize,
     pub sample_type: SampleType,
 }
