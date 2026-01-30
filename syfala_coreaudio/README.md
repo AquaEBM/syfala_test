@@ -301,3 +301,13 @@ Then, run it, while passing the location of the library as an argument. Note tha
 ```
 
 Warning: This script requires administrator privileges, and will forcibly kill `coreaudiod` to reload your plugin
+
+## Debugging
+
+It is possbile to read log messages from your plug-in by using Apple's unified logging system (what we use when we use the `oslog` crate, in Rust).
+
+To view the logs in your terminal, in real-time, use the following command:
+
+```shell
+log stream --level debug --predicate 'subsystem == "<YOUR_PLUGIN_BUNDLE_ID>"'
+```
