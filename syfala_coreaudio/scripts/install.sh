@@ -1,7 +1,7 @@
 NAME="syfala_coreaudio"
 LIBRARY_PATH=$1
 # replace with your own signature
-TEAM_ID=""
+TEAM_ID="8SHPR83B3J"
 
 # the UUID of our plugin factory
 # you can also use uuidgen
@@ -14,36 +14,30 @@ cat > "$NAME.driver/Contents/Info.plist" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>English</string>
-    <key>CFBundleExecutable</key>
-    <string>$NAME</string>
     <key>CFBundleIdentifier</key>
-    <string>com.emeraude.$NAME</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
+        <string>com.emeraude.$NAME</string>
     <key>CFBundleName</key>
-    <string>$NAME</string>
-    <key>CFBundlePackageType</key>
-    <string>BNDL</string>
-  <key>CFBundleSupportedPlatforms</key>
-    <array>
-        <string>MacOSX</string>
-    </array>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-  <key>CFPlugInFactories</key>
-    <dict>
-        <key>$FACTORY_UUID</key>
-        <string>create</string>
-    </dict>
-    <key>CFPlugInTypes</key>
-    <dict>
-        <key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+        <string>$NAME</string>
+    <key>CFBundleExecutable</key>
+        <string>$NAME</string>
+    <key>AudioServerPlugin_Network</key>
+        <true/>
+    <key>CFBundleSupportedPlatforms</key>
         <array>
-            <string>$FACTORY_UUID</string>
+            <string>MacOSX</string>
         </array>
-    </dict>
+    <key>CFPlugInFactories</key>
+        <dict>
+            <key>$FACTORY_UUID</key>
+                <string>create</string>
+        </dict>
+    <key>CFPlugInTypes</key>
+        <dict>
+            <key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+            <array>
+                <string>$FACTORY_UUID</string>
+            </array>
+        </dict>
 </dict>
 </plist>
 EOF

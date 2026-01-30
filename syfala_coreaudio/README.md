@@ -48,8 +48,6 @@ Here's a very minimal example of it's contents:
         <array>
             <string>MacOSX</string>
         </array>
-    <key>CFBundleVersion</key>
-        <string>$DRIVER_VERSION</string>
     <key>CFPlugInFactories</key>
         <dict>
             <key>$FACTORY_UUID</key>
